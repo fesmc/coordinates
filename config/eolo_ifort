@@ -1,0 +1,16 @@
+FC = ifort
+
+NETCDF_CROOT       = /home/fispalma22/work/librairies/netcdflib
+NETCDF_FORTRANROOT = /home/fispalma22/work/librairies/netcdflib
+
+INC_NC  = -I${NETCDF_FORTRANROOT}/include
+LIB_NC  = -L${NETCDF_FORTRANROOT}/lib -lnetcdff -L${NETCDF_CROOT}/lib -lnetcdf
+
+DFLAGS_NODEBUG = -O3 -fp-model precise -vec-report0
+DFLAGS_DEBUG   = -C -traceback -ftrapuv -fpe0 -check all -fp-model precise -vec-report0
+DFLAGS_PROFILE = -fp-model precise -pg
+
+FFLAGS_DEFAULT = -module $(objdir) -L$(objdir) $(INC_NC)
+FFLAGS_OPENMP  = $(FFLAGS_DEFAULT) -openmp
+
+LFLAGS  = $(LIB_NC)
