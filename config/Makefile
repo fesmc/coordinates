@@ -26,11 +26,8 @@ ifeq ($(debug), 2)
 	DFLAGS   = $(DFLAGS_PROFILE)
 endif
 
-# Determine whether to use openmp flags 
-FFLAGS = $(FFLAGS_DEFAULT)
-ifeq ($(openmp), 1)
-	FFLAGS = $(FFLAGS_OPENMP)
-endif
+# FFLAGS (incl. the OpenMP flag under openmp=1) and INC_NC come from the
+# configme-assembled block above plus config/common.mk.
 
 # Compilation shortcut
 LDFLAGS = $(FFLAGS) $(DFLAGS)
