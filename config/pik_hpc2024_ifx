@@ -1,14 +1,13 @@
 FC = ifx
 
-# NetCDF
-INC_NC  = -I${NETCDFFI_ROOT}/include
-LIB_NC  = -L${NETCDFFI_ROOT}/lib -Wl\,-rpath=${NETCDFFI_ROOT}/lib -lnetcdff -L${NETCDFC_ROOT}/lib -Wl\,-rpath=${NETCDFC_ROOT}/lib -lnetcdf
+INC_NC = -I${NETCDFFI_ROOT}/include
+LIB_NC = -L${NETCDFFI_ROOT}/lib -Wl\,-rpath=${NETCDFFI_ROOT}/lib -lnetcdff -L${NETCDFC_ROOT}/lib -Wl\,-rpath=${NETCDFC_ROOT}/lib -lnetcdf
+
+# Compiler flags (ifx). INC_NC is appended to FFLAGS by common.mk;
+# FFLAGS_OPENMP is appended when building with `make openmp=1`.
+FFLAGS = -module $(objdir) -L$(objdir)
+FFLAGS_OPENMP = -qopenmp
 
 DFLAGS_NODEBUG = -Ofast -march=core-avx2 -mtune=core-avx2 -traceback  # -mno-lzcnt
 DFLAGS_DEBUG   = -C -traceback -ftrapuv -fpe0 -check all -fp-model precise
 DFLAGS_PROFILE = -fp-model precise -pg
-
-FFLAGS_DEFAULT = -module $(objdir) -L$(objdir) $(INC_NC)
-FFLAGS_OPENMP  = $(FFLAGS_DEFAULT) -qopenmp
-
-LFLAGS  = $(LIB_NC)

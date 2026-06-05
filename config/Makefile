@@ -12,11 +12,21 @@ debug  ?= 0
 openmp ?= 1
 
 ## COMPILER CONFIGURATION ##
-# (should be loaded from config directory)
+# Loaded from a config/<host> fragment by `python config.py config/<host>`,
+# or assembled by `configme`. The fragment defines the compiler (FC,
+# FFLAGS, FFLAGS_OPENMP, DFLAGS_*), netCDF wiring (INC_NC, LIB_NC), and
+# any host-specific overrides (e.g. LFLAGS_EXTRA).
 
 <COMPILER_CONFIGURATION>
 
-# Determine whether to use normal flags (default), 
+## SHARED DEPENDENCY WIRING ##
+# Pulled in after the compiler/machine fragment so it can reference FFLAGS,
+# FFLAGS_OPENMP, INC_NC / LIB_NC, and LFLAGS_EXTRA set there. Appends
+# INC_NC to FFLAGS, applies the openmp= build switch, and sets LFLAGS.
+
+include config/common.mk
+
+# Determine whether to use normal flags (default),
 # debugging flags (debug=1) or profiling flags (debug=2)
 DFLAGS   = $(DFLAGS_NODEBUG)
 ifeq ($(debug), 1)
@@ -25,9 +35,6 @@ endif
 ifeq ($(debug), 2)
 	DFLAGS   = $(DFLAGS_PROFILE)
 endif
-
-# FFLAGS (incl. the OpenMP flag under openmp=1) and INC_NC come from the
-# configme-assembled block above plus config/common.mk.
 
 # Compilation shortcut
 LDFLAGS = $(FFLAGS) $(DFLAGS)
