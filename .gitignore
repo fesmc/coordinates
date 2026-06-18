@@ -5,3 +5,5 @@ libcoordinates/
 maps/
 output/
 profiles/
+.install.sh
+.upgrade.sh

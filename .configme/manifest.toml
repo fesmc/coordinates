@@ -1,0 +1,4 @@
+# configme manifest for coordinates.
+package = "coordinates"
+deps = [
+]
