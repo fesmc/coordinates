@@ -1,0 +1,680 @@
+[
+  {
+    "objectID": "reference/map-file-format.html",
+    "href": "reference/map-file-format.html",
+    "title": "Map file formats",
+    "section": "",
+    "text": "The library persists two kinds of mapping file. Both are NetCDF and both make the (expensive) weight computation a one-time cost.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Map file formats"
+    ]
+  },
+  {
+    "objectID": "reference/map-file-format.html#native-map-file-map_class",
+    "href": "reference/map-file-format.html#native-map-file-map_class",
+    "title": "Map file formats",
+    "section": "Native map file (map_class)",
+    "text": "Native map file (map_class)\nWritten by map_write / read by map_read (coordinates_mapping.f90).\n\nFilename: &lt;fldr&gt;/map_&lt;name1&gt;_&lt;name2&gt;_&lt;nmax&gt;.nc (e.g. maps/map_CCSM3-T42_GRL-20KM_10.nc).\nKeyed by source name, target name, and max_neighbors, so a change in any of them produces a distinct cache file.\n\n\nLayout\nThe per-target neighbor structure (map(:)%…) is flattened into packed “neighbor vector” arrays so the ragged neighbor counts fit a NetCDF file.\n\n\n\nDimension\nSize\nMeaning\n\n\n\n\npoint\nnpts\ntarget points\n\n\nneighbor_vec\nΣ neighbors\npacked neighbor links\n\n\npoint_4\nnpts·4\nbilinear corner indices\n\n\nplanetpar\n3\nplanet a, f, R\n\n\nprojpar\n5\nprojection lambda, phi, alpha, x_e, y_n\n\n\nxc/yc or lon/lat\ngrid axes\npresent when is_grid\n\n\n\n\n\n\n\n\n\n\nVariable\nMeaning\n\n\n\n\nmp_vec_nn(point)\nneighbor count per target point\n\n\nmp_vec_i(neighbor_vec)\nsource index of each link\n\n\nmp_vec_quadrant, mp_vec_border\nquadrant / border flag per link\n\n\nmp_vec_x, mp_vec_y, mp_vec_dist\nsource coords and distance per link\n\n\nmp_vec_weight\nShepard inverse-distance weight per link\n\n\nmp_vec_area\nconservative overlap-area weight per link\n\n\nmp_vec_iquad(point_4)\nthe 4 bilinear corner indices\n\n\nmp_vec_alpha1/2/3(point)\nbilinear coefficients\n\n\nx, y, lon, lat\ntarget coordinates (2D when is_grid)\n\n\nmetadata\nmtype, units, is_cartesian, is_projection, is_lon180, is_same_map, is_grid, npts, nmax, xy_conv, plus planet_info, proj_info\n\n\n\nOn read, unpack_neighbors rebuilds the per-point pt_wts_class array from the packed vectors.\n\n\n\n\n\n\nNote\n\n\n\nBecause both the neighbor distances and the areas are stored, a single cached map can drive any map_field method (nn / bilinear / quadrant / shepard) without recomputation.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Map file formats"
+    ]
+  },
+  {
+    "objectID": "reference/map-file-format.html#scrip-map-file-map_scrip_class",
+    "href": "reference/map-file-format.html#scrip-map-file-map_scrip_class",
+    "title": "Map file formats",
+    "section": "SCRIP map file (map_scrip_class)",
+    "text": "SCRIP map file (map_scrip_class)\nProduced by cdo and read by map_scrip_load (coordinates_mapping_scrip.f90). This is the standard SCRIP remapping format, a sparse weight matrix as parallel link arrays.\n\n\n\n\n\n\n\nComponent\nMeaning\n\n\n\n\nsrc_grid_size, dst_grid_size\nsource / target cell counts\n\n\nnum_links\nnumber of source→target links\n\n\nnum_wgts\nweights per link (1 for first-order conservative / bilinear)\n\n\nsrc_address(num_links)\nsource cell index of each link\n\n\ndst_address(num_links)\ndestination cell index of each link\n\n\nremap_matrix(num_wgts, num_links)\nthe weight(s)\n\n\ngrid geometry\ncenter & corner lon/lat, masks, areas, fractions\n\n\n\nApplication gathers all links with a given dst_address and forms the weighted sum Σ wⱼ var1(src_addressⱼ) / Σ wⱼ.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Map file formats"
+    ]
+  },
+  {
+    "objectID": "reference/map-file-format.html#relationship",
+    "href": "reference/map-file-format.html#relationship",
+    "title": "Map file formats",
+    "section": "Relationship",
+    "text": "Relationship\nThe two formats encode the same idea — a sparse source→target weight matrix — in different shapes. The native format is neighbor-centric (good for IDW and bilinear, where per-link distance/quadrant matter); the SCRIP format is link-centric (good for conservative weights). The improvement proposal suggests converging on a single internal sparse-weight representation that both the native and conservative paths populate, so map_field applies them uniformly.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Map file formats"
+    ]
+  },
+  {
+    "objectID": "improvements.html",
+    "href": "improvements.html",
+    "title": "Improvement proposal",
+    "section": "",
+    "text": "This is a focused design document for modernising the two operations that dominate cost — the neighbor search and the conservative weight calculation — plus a set of structural cleanups. The non-negotiable constraint is that the user-facing API stays put: map_init and map_field keep their current signatures and semantics. Everything proposed here is an internal replacement that those two routines call into.",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "improvements.html#goals-constraints",
+    "href": "improvements.html#goals-constraints",
+    "title": "Improvement proposal",
+    "section": "Goals & constraints",
+    "text": "Goals & constraints\n\n\n\n\n\n\n\nGoal\nConstraint\n\n\n\n\nNeighbor search in seconds, not minutes, on large grids\nmap_init(map, src, dst, max_neighbors, …) signature unchanged\n\n\nConservative weights computed analytically in-house\nmap_field(map, name, v1, v2, method=…) signature unchanged\n\n\nDrop the runtime cdo / YAC dependency for conservative remapping\nexisting cached map files should still load (or migrate cleanly)\n\n\nLon-lat conservative remapping supported (currently planar-only)\nresults match CDO/YAC to round-off on test cases\n\n\n\nThe yardstick is YAC: it computes mapping weights in seconds where the current brute-force + subgrid approach takes minutes. The two ideas that get us there are a spatial index (KD-tree) for the search and analytic polygon clipping for conservative overlap areas — exactly the building blocks YAC uses.",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "improvements.html#kd-tree-neighbor-search",
+    "href": "improvements.html#kd-tree-neighbor-search",
+    "title": "Improvement proposal",
+    "section": "1. KD-tree neighbor search",
+    "text": "1. KD-tree neighbor search\n\nProblem\nmap_calc_weights (coordinates_mapping.f90:450) is:\nfor each target point i in 1..M:          ! M target points\n   for each source point j in 1..N:       ! N source points  -&gt; O(N·M)\n       if |lat_j - lat_i| &lt; lat_lim:       ! weak pre-filter\n           d = distance(i, j)\n           insert-sorted into neighbor list ! cshift = O(nmax) per insert\nComplexity is O(N·M) distance evaluations (the latitude band only shaves a constant factor), and each accepted neighbor triggers an O(nmax) array shift. For two ~10⁶-cell grids this is the minutes-long step. It is OpenMP-parallel over targets, which helps but does not change the asymptotics.\n\n\nDesign\nBuild one KD-tree over the source points, then query k nearest neighbors per target point.\n\nBuild: O(N log N), once per map_init.\nQuery: O(log N + k) per target → O(M·(log N + k)) total. For N = M = 10⁶ this is ~10⁴× fewer distance evaluations than the double loop.\nParallel: queries are independent → OpenMP over targets, as today.\n\n\nHandling the sphere\nThe subtlety is that “nearest” must respect geodesic distance and wrap across the ±180° seam and the poles. The clean, standard trick is to embed lon/lat on the unit sphere in 3D and build the KD-tree in (x,y,z):\nxyz = [ cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat) ]\nChord distance in 3D is monotonic in great-circle distance, so the k nearest in 3D Euclidean space are exactly the k nearest geodesically. This removes all seam/pole special-casing for free, and it unifies the three current cases — lon-lat, same-projection Cartesian, cross-projection — into one tree:\n\n\n\n\n\n\n\nCase\nTree coordinates\n\n\n\n\nsame Cartesian / same projection\nthe projected x, y (optionally z=0)\n\n\nlon-lat or cross-projection\nthe 3D unit-sphere embedding above\n\n\n\nAfter the k candidates are found, the exact geodesic distance (or Cartesian distance for the projected case) is computed once per candidate using the existing planet_distance / cartesian_distance, preserving today’s numbers in pt_wts_class%dist. The KD-tree only changes which candidates are evaluated, not the distance metric stored.\n\n\nProposed module\nA new self-contained module, no external deps:\nmodule kdtree\n  type kdtree_t\n     ! flat arrays: split dims, split values, point indices, child pointers\n  end type\n\n  ! Build from N points (2D projected or 3D sphere-embedded)\n  subroutine kdtree_build(tree, pts_xyz)          ! pts_xyz(ndim, N)\n\n  ! k nearest neighbors to a query point; returns indices + squared dists\n  subroutine kdtree_knn(tree, q_xyz, k, idx, d2, nfound)\n\n  ! all neighbors within a radius (for radius/shepard and conservative search)\n  subroutine kdtree_radius(tree, q_xyz, r, idx, d2, nfound)\nend module\nA left-balanced array-backed KD-tree (median split on the widest dimension) keeps it allocation-light and cache-friendly; ~300 lines of Fortran, no recursion needed at query time if implemented with an explicit stack.\n\n\nWhere it slots in\nmap_calc_weights is rewritten as:\nbuild tree over source xyz                    ! O(N log N)\n!$omp parallel do\nfor each target i:\n    kdtree_knn(tree, q_i, max_neighbors, idx, d2, n)\n    for each candidate: compute exact dist, quadrant, border, weight\n    store into map%map(i)                       ! no cshift; already k-sized\nThe sorted-insertion cshift logic disappears (the KNN result is already the k nearest; sort k items once). Quadrant assignment, border detection, and weight = 1/dist^p are unchanged. map_init, the cache format, and map_field are untouched.\nThe same kdtree_radius query also replaces the bounding-box which(...) linear scan used by the conservative neighbor search (below) and by interp_nearest_fast.\n\n\n\nEffort & risk\n\n\n\n\n\n\n\nEffort\nMedium — one new module (~300 LOC) + rewrite of map_calc_weights inner loop\n\n\nRisk\nLow — drop-in; outputs validated against the existing brute-force result on test grids (bit-comparable distances, identical neighbor sets)\n\n\nPayoff\nThe headline minutes→seconds win for nn/bilinear/quadrant/shepard",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "improvements.html#analytic-conservative-weights-spherical-polygon-clipping",
+    "href": "improvements.html#analytic-conservative-weights-spherical-polygon-clipping",
+    "title": "Improvement proposal",
+    "section": "2. Analytic conservative weights (spherical polygon clipping)",
+    "text": "2. Analytic conservative weights (spherical polygon clipping)\n\nProblem\nConservative overlap areas are estimated by subgrid point sampling (interp2D_conservative.f90:504, coordinates_mapping.f90:758): each source cell is diced into nx×ny points (up to ~31²), each tested with a ray-cast point-in-polygon, and the overlap is the fraction inside × cell area. This is:\n\napproximate — the overlap area is quantised to 1/(nx·ny);\nslow — cost grows ~quadratically with the source/target resolution ratio;\nplanar only — the embedded copy explicitly does not support lon-lat (coordinates_mapping.f90:782).\n\n\n\nDesign\nCompute each overlap area exactly by clipping the source cell polygon against the target cell polygon and integrating the area of the clipped result — the YAC approach.\n\nStep 1 — find candidate source cells\nUse kdtree_radius (from §1) around each target cell center with radius ≈ the target cell diagonal + max source cell diagonal. This replaces the linear bounding-box scan and bounds the candidate set to O(1) cells per target.\n\n\nStep 2 — clip polygons\nFor each candidate source cell, clip it against the (convex, rectangular) target cell with Sutherland–Hodgman:\nclip source-polygon S against each edge E of target-polygon T:\n    keep the portion of S on T's interior side of E\nresult R = clipped polygon (empty if no overlap)\noverlap_area = area(R)\nweight = overlap_area / area(T)        ! for flux-conserving \"mean\"\nSutherland–Hodgman is exact, O(|S|·|T|) per pair (here 4·4), and needs only line-segment intersection + inside-edge test — no point-in-polygon sampling, no ray casting. For axis-aligned rectangular cells it simplifies to interval overlaps, but the general clip keeps it correct for rotated/projected cells.\n\n\nStep 3 — planar vs spherical\n\n\n\n\n\n\n\n\nMode\nClip in…\nArea via…\n\n\n\n\nCartesian / same projection\nprojected x, y plane\nshoelace (cartesian_area)\n\n\nlon-lat (large cells)\non the sphere: edges are great-circle arcs; clip with spherical half-space tests\nplanet_area (geodesic, already in planet.f90)\n\n\n\nThe planar clip covers the common projected-grid case exactly. The spherical clip — replacing each Cartesian edge test with a great-circle/point-side test and integrating with the existing geodesic planet_area — is what unlocks correct lon-lat conservative remapping, which the current code lacks. This is precisely YAC’s algorithm and is the one genuinely new piece of geometry.\n\n\n\n\n\n\nTipIncremental path\n\n\n\nShip the planar Sutherland–Hodgman clip first (covers projected target grids, the dominant use case, exactly and fast). Add the spherical clip as a second stage to retire the lon-lat gap and fully match YAC. Each stage is independently testable against CDO output.\n\n\n\n\nWhere it slots in\nmap_conservative_init keeps its signature; internally it (a) queries the KD-tree for candidates and (b) calls a new cell_overlap_area(src_cell, dst_cell, latlon) instead of interpconserv1_weights. The result fills the same pt_wts_class%area array, so map_field_conservative_map / map_field_conservative_map1 apply it unchanged. map_field(method=\"con\") can then route to this path with no external cdo call.\n\n\n\nEffort & risk\n\n\n\n\n\n\n\nEffort\nMedium (planar) + Medium (spherical) — one polygon_clip module reusing polygons/planet\n\n\nRisk\nMedium — geometry edge cases (degenerate/zero-area clips, antimeridian, poles). Mitigated by validating area conservation (Σ weights·areas) and diffing against CDO gencon on the existing test grids\n\n\nPayoff\nRemoves the runtime cdo/YAC dependency; exact (not sampled) weights; lon-lat support; orders-of-magnitude faster than subgrid sampling at high resolution ratios",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "improvements.html#unify-the-weight-store-and-apply-path",
+    "href": "improvements.html#unify-the-weight-store-and-apply-path",
+    "title": "Improvement proposal",
+    "section": "3. Unify the weight store and apply path",
+    "text": "3. Unify the weight store and apply path\nToday there are three conservative implementations and two separate pt_wts_class / calc_grid_total definitions (interp2D_conservative.f90, coordinates_mapping_conservative.f90, coordinates_mapping.f90), plus a separate SCRIP remap_matrix representation. They all encode the same object: a sparse source→target weight matrix.\nProposal: a single internal sparse-weight type, populated by every path (IDW, bilinear, conservative, or imported SCRIP), and one apply routine.\ntype weight_map_t\n    integer :: n_src, n_dst, n_links\n    integer,  allocatable :: src(:), dst(:)   ! link addresses (SCRIP-style)\n    real(dp), allocatable :: w(:)             ! link weights\nend type\n\n! one applicator for every method\nsubroutine weight_map_apply(wm, var1, var2, op, missing_value)\n    ! op = \"mean\" | \"sum\" | \"count\" | \"stdev\"\nBenefits:\n\nmap_field and map_scrip_field share one tested kernel; method=\"mean\", \"count\", \"stdev\" live in one place instead of three.\nThe native and SCRIP map files become two serialisations of the same object — one loader, one writer (see Map file formats).\nConservative area, Shepard weight, and bilinear alpha all reduce to link weights, so the per-method branching in map_field shrinks.\n\nKeep pt_wts_class as the neighbor-centric view (it carries quadrant/border needed during search) but derive the link arrays from it for application.\n\n\n\n\n\n\n\nEffort\nLow–Medium (mechanical consolidation + tests)\n\n\n\n\nRisk\nLow — pure refactor behind unchanged public API\n\n\nPayoff\nRemoves duplication, one place to optimise/parallelise, simpler cache code",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "improvements.html#smaller-generalisations-cleanups",
+    "href": "improvements.html#smaller-generalisations-cleanups",
+    "title": "Improvement proposal",
+    "section": "4. Smaller generalisations & cleanups",
+    "text": "4. Smaller generalisations & cleanups\n\n\n\n\n\n\n\n\nItem\nCurrent\nProposed\n\n\n\n\nindex utilities\nunique_*, maxcount are O(n²)\nhash/sort-based O(n log n); these run inside conservative count/stdev\n\n\nProjection coverage\noblique/polar stereographic + LAEA only\nadd Lambert conformal, Mercator, rotated-pole behind the same mtype/proj dispatch (the OBLIMAP dispatch table makes this additive)\n\n\nPlanets\nhard-coded WGS84 + Spherical Earth\ndata-driven planet_init (name → params table) so other bodies/ellipsoids are one-line additions\n\n\ngrid_to_cdo wraplon bug\nwraplon=.TRUE. mishandles the lon=0 seam\nobsolete once §2 removes the CDO path; until then, fix or guard it\n\n\nSingle/double precision\npt_wts_class mixes sp/dp; prec=sp globally\nmake the working precision a single compile-time switch; store weights in dp to avoid conservative-sum drift\n\n\nBilinear as weights\nspecial-cased alpha1/2/3 + calc_bilin_point\nexpress as 4 link weights in the unified store (§3); one apply path\n\n\nRepeated grid→points conversions\neach map_init overload re-converts\ncache the points view on the grid object",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "improvements.html#suggested-sequencing",
+    "href": "improvements.html#suggested-sequencing",
+    "title": "Improvement proposal",
+    "section": "Suggested sequencing",
+    "text": "Suggested sequencing\n\nKD-tree module + rewire map_calc_weights (§1). Self-contained, immediate win for the methods you use most, no format change. Validate against current output.\nUnified weight store (§3). Refactor with the search already faster; simplifies the next step.\nPlanar analytic conservative clip (§2, stage 1). Removes cdo for projected target grids.\nSpherical conservative clip (§2, stage 2). Retires the lon-lat gap; full CDO/YAC parity.\nCleanups (§4) opportunistically alongside the above.\n\nThroughout, map_init and map_field remain the only entry points your downstream code calls — the speed-up and the removal of the cdo dependency are entirely under the hood.\n\n\n\n\n\n\nNoteValidation strategy\n\n\n\nEach step is gated on reproducing existing results: the KD-tree must return the same neighbor sets as the brute-force loop; the analytic conservative weights must (a) conserve area to round-off and (b) match cdo gencon on the repository test grids (test_ccsm3.f90, test_climber.f90, the MAR/ETOPO tests). Only once parity is shown does the cdo path get retired.",
+    "crumbs": [
+      "Overview",
+      "Improvement proposal"
+    ]
+  },
+  {
+    "objectID": "api/conservative.html",
+    "href": "api/conservative.html",
+    "title": "Conservative remapping",
+    "section": "",
+    "text": "Conservative remapping preserves the area-integral of a field when moving between grids — essential for fluxes, mass, and any quantity that must be globally conserved. The library implements it in-house by subgrid point sampling, and also offers an external CDO/SCRIP path that is preferred in practice for large grids.\nModules:",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Conservative remapping"
+    ]
+  },
+  {
+    "objectID": "api/conservative.html#public-api",
+    "href": "api/conservative.html#public-api",
+    "title": "Conservative remapping",
+    "section": "Public API",
+    "text": "Public API\n\n\n\n\n\n\n\n\nRoutine\nModule\nPurpose\n\n\n\n\nmap_conservative_init(map, grid1, grid2)\ninterp2D_conservative\nbuild overlap-area weights grid1→grid2\n\n\nmap_field_conservative_map(map, varname, var1, var2, fill, missing_value, mask_pack)\ninterp2D_conservative\napply weights (area-weighted mean)\n\n\nmap_field_conservative_grid(grid1, grid2, varname, var1, var2, …)\ninterp2D_conservative\none-shot init+apply between two grids\n\n\nmap_field_conservative_smooth(map, map_hilo, grid1, grid2, …)\ninterp2D_conservative\nconservative + smoothing variant\n\n\ninterpconserv1_weights(x, y, dx, dy, xout, yout, dxout, dyout, latlon)\ninterp2D_conservative\noverlap area of source cells with one target cell\n\n\nmap_field_conservative_map1(mp, varname, var1, var2, method, …)\n…_conservative\napply weights with method = mean/count/stdev\n\n\ncalc_grid_total(x, y, var, xlim, ylim)\nboth\narea-integral of a field over a region",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Conservative remapping"
+    ]
+  },
+  {
+    "objectID": "api/conservative.html#how-the-weights-are-computed-subgrid-sampling",
+    "href": "api/conservative.html#how-the-weights-are-computed-subgrid-sampling",
+    "title": "Conservative remapping",
+    "section": "How the weights are computed (subgrid sampling)",
+    "text": "How the weights are computed (subgrid sampling)\nFor each target cell, the overlap area contributed by each nearby source cell is estimated by dicing the source cell into a regular grid of sample points and counting how many fall inside the target cell polygon (interpconserv1_weights, interp2D_conservative.f90:504):\n! Target cell as a rectangular polygon\npol = create_polygon([xout±dxout/2], [yout±dyout/2])\n\n! For each candidate source cell, sample nx×ny subgrid points\nnx = max(1, int(dx/dxout))      ! (the copy in coordinates_mapping.f90 uses max(5, …))\nny = max(1, int(dy/dyout))\ndo j = 1, ny\n  do i = 1, nx\n     x1 = (x-dx/2) + dx*(i-0.5)/nx\n     y1 = (y-dy/2) + dy*(j-0.5)/ny\n     if (point_in_polygon(x1, y1, pol)) npts_in = npts_in + 1\n  end do\nend do\n\n! Overlap area  ≈  (fraction of points inside) × source cell area\narea(now) = dble(npts_in)/dble(nx*ny) * dx*dy\nThe candidate source cells are found with an axis-aligned bounding-box scan (which(...), a linear pass over all source points) sized by the coarser of the two cell spacings.\n\nApplying the weights\n! area-weighted mean, skipping missing source values\nvar2(i) = sum(var1(ii)*area, mask=area&gt;0) / sum(area, mask=area&gt;0)\nmap_field_conservative_map1 additionally offers method=\"count\" (modal / most-frequent value, weighted by area) and method=\"stdev\" (area-weighted standard deviation).",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Conservative remapping"
+    ]
+  },
+  {
+    "objectID": "api/conservative.html#cost-and-limitations",
+    "href": "api/conservative.html#cost-and-limitations",
+    "title": "Conservative remapping",
+    "section": "Cost and limitations",
+    "text": "Cost and limitations\n\n\n\n\n\n\n\nProperty\nStatus\n\n\n\n\nAccuracy\napproximate — error ∝ 1/(subgrid points); a step function of the resolution ratio\n\n\nCost per target cell\nO(n_neighbors × nx × ny × cost(point-in-polygon))\n\n\nResolution-ratio scaling\nnx,ny ∝ dx/dxout, so cost grows ~quadratically with the ratio (up to ~31×31 sub-points)\n\n\nLon-lat support\nnot supported in the embedded copy (coordinates_mapping.f90:782); assumes planar rectangular cells\n\n\nNeighbor search\nbounding-box linear scan, no spatial index\n\n\n\nThis is why, for production conservative remapping on large grids, the library shells out to cdo (which uses YAC’s analytic spherical clipping). The improvement proposal replaces the subgrid sampling with analytic polygon clipping so the in-house path matches CDO’s accuracy and speed, and drops the external dependency.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Conservative remapping"
+    ]
+  },
+  {
+    "objectID": "api/scrip-cdo.html",
+    "href": "api/scrip-cdo.html",
+    "title": "SCRIP / CDO remapping path",
+    "section": "",
+    "text": "For heavy remapping — especially conservative remapping on large grids — the library outsources weight generation to the external cdo command-line tool, which uses YAC internally to compute SCRIP-format weights in seconds. The library writes grid descriptions, invokes cdo, reads the resulting weight file, and applies it.\nModules:",
+    "crumbs": [
+      "Overview",
+      "API",
+      "SCRIP / CDO remapping path"
+    ]
+  },
+  {
+    "objectID": "api/scrip-cdo.html#the-scrip-weight-format",
+    "href": "api/scrip-cdo.html#the-scrip-weight-format",
+    "title": "SCRIP / CDO remapping path",
+    "section": "The SCRIP weight format",
+    "text": "The SCRIP weight format\nA SCRIP map is a NetCDF file storing a sparse remapping matrix as parallel link arrays. The map_scrip_class holds:\n\nsrc_grid_size, dst_grid_size, grid dims, num_links, num_wgts.\nGrid geometry: center lon/lat, corner lon/lat, masks, areas, fractions.\nThe sparse matrix as three arrays:\n\nsrc_address(num_links) — source cell index of each link,\ndst_address(num_links) — destination cell index of each link,\nremap_matrix(num_wgts, num_links) — the weight(s) of each link (num_wgts = 1 for first-order conservative / nearest / bilinear).\n\n\nApplying the map is then: for each destination cell k, gather the links with dst_address == k and form var2(k) = Σ wⱼ·var1(src_addressⱼ) / Σ wⱼ.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "SCRIP / CDO remapping path"
+    ]
+  },
+  {
+    "objectID": "api/scrip-cdo.html#user-api",
+    "href": "api/scrip-cdo.html#user-api",
+    "title": "SCRIP / CDO remapping path",
+    "section": "User API",
+    "text": "User API\n\nmap_scrip_init\nsubroutine map_scrip_init(mps, grid1, grid2, method, fldr, load, clean)\n\n\n\n\n\n\n\n\nArgument\nDefault\nMeaning\n\n\n\n\nmps (inout)\n–\nSCRIP map object to fill\n\n\ngrid1, grid2\n–\nsource and target grids\n\n\nmethod\n\"con\"\n\"con\" (conservative), \"bil\" (bilinear), \"bic\" (bicubic)\n\n\nfldr\n\"maps\"\ndirectory for grid-desc + map files\n\n\nload\n.TRUE.\nload an existing map file if present\n\n\nclean\n–\ndelete the temporary grid/desc files afterwards\n\n\n\nIt writes CDO grid descriptions for both grids, writes the source grid to NetCDF, runs cdo, then loads the resulting SCRIP file via map_scrip_load.\n\n\nmap_scrip_field\nsubroutine map_scrip_field(map, var_name, var1, var2, mask2, method, reset, &\n                           missing_value, mask_pack, fill_method, &\n                           filt_method, filt_par, verbose)\n\n\n\n\n\n\n\nArgument\nMeaning\n\n\n\n\nvar1, var2\nsource / target 2D fields\n\n\nmethod\n\"mean\" (conservative weighted mean), \"count\" (weighted mode), \"stdev\"\n\n\nfill_method\npost-fill of unmapped cells: \"weighted\", \"nn\", \"none\"\n\n\nfilt_method\noptional post-smoothing: \"gaussian\", \"gaussian-fast\", \"poisson\"\n\n\nfilt_par\nfilter parameters (e.g. σ)\n\n\nmissing_value, mask_pack, reset, verbose\nas in map_field\n\n\n\nThe design intentionally mirrors map_init / map_field so switching a workflow between the in-house and CDO paths is a near drop-in change.\n\n\nOther entry points\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\nmap_scrip_init_from_griddesc(map, src_name, dst_name, fldr, src_nc, method, load)\nthe active path that builds the cdo gen… command\n\n\nmap_scrip_load(map, src_name, dst_name, fldr, method)\nread a pre-computed SCRIP NetCDF file",
+    "crumbs": [
+      "Overview",
+      "API",
+      "SCRIP / CDO remapping path"
+    ]
+  },
+  {
+    "objectID": "api/scrip-cdo.html#the-cdo-commands",
+    "href": "api/scrip-cdo.html#the-cdo-commands",
+    "title": "SCRIP / CDO remapping path",
+    "section": "The CDO commands",
+    "text": "The CDO commands\nThe weight generation (map_scrip_init_from_griddesc, coordinates_mapping_scrip.f90:853) builds and runs:\ncdo gen&lt;method&gt;,&lt;target_griddesc&gt; -setgrid,&lt;source_griddesc&gt; &lt;source.nc&gt; &lt;map.nc&gt;\n# e.g.\ncdo gencon,grid_GRL.txt -setgrid,grid_CCSM3.txt ccsm3.nc map_CCSM3_GRL.nc\nGrid descriptions are produced by grid_to_cdo:\n\ngrid_cdo_write_desc_short(grid, fldr) — writes a compact CDO grid description (grid_&lt;name&gt;.txt): gridtype (lonlat / projection / cartesian / generic), sizes, axis first/inc, and projection metadata (origin lon/lat, oblique angle, planet axes) as a grid_mapping.\ngrid_cdo_write_desc_explicit_proj(lon2D, lat2D, …) — explicit curvilinear description with per-cell corner bounds computed from neighbouring centers.\ngrid_cdo_write_desc_explicit_latlon(lon, lat, …, wraplon) — 1D lon/lat with optional periodic wrap.\ncall_system_cdo(cdo_cmd) — runs the command via execute_command_line, checks the exit status, and stops on error.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "SCRIP / CDO remapping path"
+    ]
+  },
+  {
+    "objectID": "api/scrip-cdo.html#caveats",
+    "href": "api/scrip-cdo.html#caveats",
+    "title": "SCRIP / CDO remapping path",
+    "section": "Caveats",
+    "text": "Caveats\n\nRequires cdo to be installed and on PATH at runtime — an external, out-of-process dependency.\nThe explicit curvilinear path has had trouble with CDO rejecting missing cell corners (“Target grid cell corner coordinates missing!”), so the compact …_short descriptions are preferred.\ngrid_cdo_write_desc_explicit_latlon’s wraplon=.TRUE. is documented as buggy (mis-handles the lon=0 seam).\n\nRemoving this external dependency — by computing SCRIP-equivalent conservative weights in-house with analytic clipping — is the central goal of the improvement proposal.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "SCRIP / CDO remapping path"
+    ]
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "coordinates",
+    "section": "",
+    "text": "The coordinates library manages grids and arbitrary sets of points, and maps fields between them. It handles projection between coordinate systems, nearest-neighbor and conservative interpolation, and caches the (expensive) mapping calculation to disk so it is only ever done once per grid pair.\nIt is the workhorse behind regional/global climate and ice-sheet model pre-processing: taking observations or model output on one grid (a global lat-lon grid, an unstructured set of station locations, polygon data) and remapping them onto another (e.g. a regional oblique-stereographic grid over Greenland or Antarctica).",
+    "crumbs": [
+      "Overview",
+      "coordinates"
+    ]
+  },
+  {
+    "objectID": "index.html#the-mental-model",
+    "href": "index.html#the-mental-model",
+    "title": "coordinates",
+    "section": "The mental model",
+    "text": "The mental model\nEverything is built on points. A grid is just a structured 2D arrangement of points, and a map records, for each target point, which source points feed it and with what weight. Because the design pushes all the state into these three objects, mapping a field between two domains takes only three steps and no temporary bookkeeping variables.\n\n\n\n\n\nflowchart LR\n    A[\"grid_class / points_class&lt;br/&gt;(source)\"] --&gt;|map_init| M[\"map_class&lt;br/&gt;(neighbors + weights,&lt;br/&gt;cached to NetCDF)\"]\n    B[\"grid_class / points_class&lt;br/&gt;(target)\"] --&gt;|map_init| M\n    M --&gt;|map_field| F[\"field on target grid\"]\n    V[\"field on source grid\"] --&gt; F",
+    "crumbs": [
+      "Overview",
+      "coordinates"
+    ]
+  },
+  {
+    "objectID": "index.html#the-three-step-example",
+    "href": "index.html#the-three-step-example",
+    "title": "coordinates",
+    "section": "The three-step example",
+    "text": "The three-step example\nuse coord\n\ntype(grid_class) :: gCCSM3, gGRL\ntype(map_class)  :: map1\n\n! 1. Define each grid (global lat-lon source, regional stereographic target)\ncall grid_init(gCCSM3, name=\"CCSM3-T42\", mtype=\"latlon\", units=\"degrees\", &\n               x0=0.d0,   dx=2.d0, nx=180, y0=-90.d0, dy=2.d0, ny=90)\n\ncall grid_init(gGRL, name=\"GRL-20KM\", mtype=\"stereographic\", units=\"kilometers\", &\n               dx=20.d0, nx=76, dy=20.d0, ny=151, &\n               lambda=-40.d0, phi=72.d0, alpha=7.5d0)\n\n! 2. Build (or load from cache) the mapping between them\ncall map_init(map1, gCCSM3, gGRL, max_neighbors=10)\n\n! 3. Map a field\ncall map_field(map1, \"t2m\", var_ccsm3, var_grl, mask_map, method=\"quadrant\")\nThe first map_init for a given grid pair computes neighbors and writes a NetCDF map file under maps/. Every later run loads that file instead of recomputing — so the up-front cost (often &gt;1 minute on large grids) is paid once.",
+    "crumbs": [
+      "Overview",
+      "coordinates"
+    ]
+  },
+  {
+    "objectID": "index.html#whats-documented-here",
+    "href": "index.html#whats-documented-here",
+    "title": "coordinates",
+    "section": "What’s documented here",
+    "text": "What’s documented here\n\nConcepts — the points / grid / map data model and the philosophy of points as the primitive.\nAPI — the public interface, organised by module: coordinates (building points & grids), mapping (map_init / map_field), conservative remapping, the SCRIP/CDO path, and helper modules.\nReference — supported projections & planets and the on-disk map file formats.\nImprovements — a focused design proposal for replacing the brute-force neighbor search with a KD-tree and the subgrid-sampling conservative weights with analytic spherical-polygon clipping, removing the external CDO dependency while keeping map_init / map_field unchanged.",
+    "crumbs": [
+      "Overview",
+      "coordinates"
+    ]
+  },
+  {
+    "objectID": "index.html#installation-in-brief",
+    "href": "index.html#installation-in-brief",
+    "title": "coordinates",
+    "section": "Installation in brief",
+    "text": "Installation in brief\nThe library depends only on a Fortran compiler and NetCDF (the bundled NCIO wraps it). The optional conservative-remapping-via-CDO path additionally calls the cdo command-line tool at runtime. Build the static library with make coordinates and link against libcoordinates/include/libcoordinates.a, then use coord in your program.\n\n\n\n\n\n\nNote\n\n\n\nThis documentation was reconstructed by reading the source. Line references (e.g. coordinates_mapping.f90:450) point at the version of the code in this repository and are meant as navigation aids.",
+    "crumbs": [
+      "Overview",
+      "coordinates"
+    ]
+  },
+  {
+    "objectID": "concepts.html",
+    "href": "concepts.html",
+    "title": "Concepts & data model",
+    "section": "",
+    "text": "The central design choice of the library is that all geometry reduces to a set of points. A point carries its location in the working coordinate system (x, y), its geographic location (lon, lat), and — where meaningful — a representative area and cell spacing (dx, dy). Every operation (distance, projection, neighbor search, interpolation) is defined on points.\nA grid is then nothing more than points laid out on a structured 2D mesh, plus axis metadata describing that mesh. This is why the library can interpolate equally well between two grids, between scattered observations and a grid, or between polygons and a grid — they are all just points underneath.\n\n\n\n\n\nclassDiagram\n    class points_class {\n      +npts\n      +x(:) y(:) lon(:) lat(:)\n      +area(:) dx(:) dy(:)\n      +mtype, units, planet, proj\n    }\n    class grid_class {\n      +npts\n      +x(:,:) y(:,:) lon(:,:) lat(:,:)\n      +area(:,:)\n      +G : grid_axis_class\n    }\n    class grid_axis_class {\n      +nx ny\n      +x0 dx y0 dy\n      +x(:) y(:)\n    }\n    class map_class {\n      +npts nmax\n      +map(:) : pt_wts_class\n    }\n    class pt_wts_class {\n      +n\n      +i(:) dist(:) weight(:) area(:)\n      +quadrant(:) border(:)\n    }\n    grid_class --&gt; grid_axis_class\n    grid_class ..&gt; points_class : grid_to_points\n    points_class ..&gt; grid_class : points_to_grid\n    map_class --&gt; pt_wts_class",
+    "crumbs": [
+      "Overview",
+      "Concepts & data model"
+    ]
+  },
+  {
+    "objectID": "concepts.html#points-are-the-primitive",
+    "href": "concepts.html#points-are-the-primitive",
+    "title": "Concepts & data model",
+    "section": "",
+    "text": "The central design choice of the library is that all geometry reduces to a set of points. A point carries its location in the working coordinate system (x, y), its geographic location (lon, lat), and — where meaningful — a representative area and cell spacing (dx, dy). Every operation (distance, projection, neighbor search, interpolation) is defined on points.\nA grid is then nothing more than points laid out on a structured 2D mesh, plus axis metadata describing that mesh. This is why the library can interpolate equally well between two grids, between scattered observations and a grid, or between polygons and a grid — they are all just points underneath.\n\n\n\n\n\nclassDiagram\n    class points_class {\n      +npts\n      +x(:) y(:) lon(:) lat(:)\n      +area(:) dx(:) dy(:)\n      +mtype, units, planet, proj\n    }\n    class grid_class {\n      +npts\n      +x(:,:) y(:,:) lon(:,:) lat(:,:)\n      +area(:,:)\n      +G : grid_axis_class\n    }\n    class grid_axis_class {\n      +nx ny\n      +x0 dx y0 dy\n      +x(:) y(:)\n    }\n    class map_class {\n      +npts nmax\n      +map(:) : pt_wts_class\n    }\n    class pt_wts_class {\n      +n\n      +i(:) dist(:) weight(:) area(:)\n      +quadrant(:) border(:)\n    }\n    grid_class --&gt; grid_axis_class\n    grid_class ..&gt; points_class : grid_to_points\n    points_class ..&gt; grid_class : points_to_grid\n    map_class --&gt; pt_wts_class",
+    "crumbs": [
+      "Overview",
+      "Concepts & data model"
+    ]
+  },
+  {
+    "objectID": "concepts.html#the-three-objects",
+    "href": "concepts.html#the-three-objects",
+    "title": "Concepts & data model",
+    "section": "The three objects",
+    "text": "The three objects\n\n\n\n\n\n\n\n\nObject\nHolds\nBuilt by\n\n\n\n\npoints_class\n1D vectors of locations (+ optional area, dx/dy)\npoints_init\n\n\ngrid_class\nsame, as 2D arrays, plus a grid_axis_class\ngrid_init\n\n\nmap_class\nper-target-point neighbor list + weights\nmap_init\n\n\n\nConvert freely between the first two with grid_to_points(grid, pts) and points_to_grid(pts, grid).\n\nCoordinate-system metadata\nBoth points_class and grid_class carry the same descriptive fields:\n\nmtype — the coordinate/map type string: latlon / latitude_longitude / gaussian, cartesian, or a projection (stereographic, polar_stereographic, lambert_azimuthal_equal_area).\nunits — axis units (degrees, kilometers, meters, …). A scalar xy_conv factor converts the stored axis units to meters for distance work.\nplanet — a planet_class (either \"WGS84\" or \"Spherical Earth\").\nproj — a projection_class with parameters lambda, phi, alpha, x_e, y_n (only populated when is_projection).\nis_cartesian, is_projection, is_lon180 — booleans that drive how distances and neighbors are computed.\n\nSee Projections & planets for the full set of supported values.",
+    "crumbs": [
+      "Overview",
+      "Concepts & data model"
+    ]
+  },
+  {
+    "objectID": "concepts.html#how-a-field-is-mapped",
+    "href": "concepts.html#how-a-field-is-mapped",
+    "title": "Concepts & data model",
+    "section": "How a field is mapped",
+    "text": "How a field is mapped\n\nmap_init(map, src, dst, max_neighbors=…) finds, for every target point, its nearest source points (up to max_neighbors), records their indices, distances, quadrants, and inverse-distance weights, and (for structured grids) precomputes bilinear coefficients. The whole structure is cached to a NetCDF map file keyed by the two grid names and max_neighbors.\nmap_field(map, name, var_src, var_dst, …, method=…) applies those stored neighbors/weights to an actual field. The method (nn, bilinear, quadrant, radius/shepard) selects how the per-point neighbor values are combined.\n\nBecause the neighbor distances are stored, the same cached map supports any distance-based weighting scheme without recomputation — you can change method at map_field time for free.",
+    "crumbs": [
+      "Overview",
+      "Concepts & data model"
+    ]
+  },
+  {
+    "objectID": "concepts.html#distances",
+    "href": "concepts.html#distances",
+    "title": "Concepts & data model",
+    "section": "Distances",
+    "text": "Distances\nDistance is computed two ways, chosen automatically:\n\nCartesian / same projected system → Euclidean distance in the working units (cartesian_distance).\nOtherwise (lon-lat or cross-projection) → geodesic distance on the planet ellipsoid via Karney’s GeographicLib algorithms, bundled as geodesic.f90 (planet_distance).\n\nThis is the rule of thumb stated throughout the codebase: unless both point sets live on the same Cartesian/projected system, distances are geodesic lon-lat calculations.",
+    "crumbs": [
+      "Overview",
+      "Concepts & data model"
+    ]
+  },
+  {
+    "objectID": "concepts.html#where-the-cost-is",
+    "href": "concepts.html#where-the-cost-is",
+    "title": "Concepts & data model",
+    "section": "Where the cost is",
+    "text": "Where the cost is\nTwo operations dominate runtime, and both are the focus of the improvement proposal:\n\nNeighbor search in map_init is brute force — an O(N×M) double loop over source × target points with a latitude pre-filter, no spatial index.\nConservative weights are approximated by dicing each source cell into subgrid points and counting how many fall inside the target cell, rather than computing the polygon overlap analytically.\n\nBoth are correct but slow, which is why heavy conservative remapping is currently outsourced to the external cdo tool (which uses YAC internally).",
+    "crumbs": [
+      "Overview",
+      "Concepts & data model"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html",
+    "href": "api/coordinates.html",
+    "title": "Coordinates — points & grids",
+    "section": "",
+    "text": "Module: coordinates (src/coordinates.f90). Defines the two geometry types and their constructors, conversions, I/O, and cell-area calculation.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#types",
+    "href": "api/coordinates.html#types",
+    "title": "Coordinates — points & grids",
+    "section": "Types",
+    "text": "Types\n\npoints_class\ntype points_class\n    character(len=128) :: name        ! dataset name\n    character(len=128) :: mtype       ! latlon | cartesian | stereographic | ...\n    character(len=128) :: units       ! degrees | kilometers | meters | ...\n    type(planet_class) :: planet      ! WGS84 or Spherical Earth\n\n    logical :: is_cartesian, is_projection\n    logical :: is_lon180              ! .TRUE. =&gt; lon in [-180,180]; .FALSE. =&gt; [0,360]\n    type(projection_class) :: proj\n\n    integer :: npts\n    real(dp), allocatable :: x(:), y(:), lon(:), lat(:), area(:)\n    real(dp), allocatable :: dx(:), dy(:)   ! per-point cell spacing (for conservative)\n    integer,  allocatable :: border(:)\n    real(dp) :: xy_conv               ! axis-units -&gt; meters conversion factor\nend type\n\n\ngrid_class\nSame descriptive fields as points_class, but the location arrays are 2D and a structured-axis descriptor G is attached:\ntype grid_class\n    ! ... same metadata fields as points_class ...\n    integer :: npts\n    real(dp), allocatable :: x(:,:), y(:,:), lon(:,:), lat(:,:), area(:,:)\n    integer,  allocatable :: border(:,:)\n    real(dp) :: xy_conv\n    type(grid_axis_class) :: G\nend type\n\ntype grid_axis_class\n    integer  :: nx, ny\n    real(dp) :: x0, dx, y0, dy\n    real(dp), allocatable :: x(:), y(:)\nend type",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#building-a-grid-grid_init",
+    "href": "api/coordinates.html#building-a-grid-grid_init",
+    "title": "Coordinates — points & grids",
+    "section": "Building a grid — grid_init",
+    "text": "Building a grid — grid_init\ngrid_init is a generic interface with four constructors. The most common is from options:\nsubroutine grid_init_from_opts(grid, name, mtype, units, &\n                               planet, lon180, &\n                               x, y, x0, dx, nx, y0, dy, ny, &\n                               lambda, phi, alpha, x_e, y_n)\n\n\n\n\n\n\n\n\nArgument\nRequired\nMeaning\n\n\n\n\ngrid\n✔ (out)\nthe grid object to fill\n\n\nname\n✔\ngrid name (used in cached map filenames)\n\n\nmtype\n✔\ncoordinate/map type string\n\n\nunits\n✔\naxis units\n\n\nplanet\n–\n\"WGS84\" (default) or \"Spherical Earth\"\n\n\nlon180\n–\nlongitude convention\n\n\nx, y\n–\nexplicit axis vectors (alternative to x0/dx/nx)\n\n\nx0, dx, nx\n–\nx-axis origin / spacing / count\n\n\ny0, dy, ny\n–\ny-axis origin / spacing / count\n\n\nlambda, phi, alpha\n–\nprojection centre lon, centre lat, oblique angle\n\n\nx_e, y_n\n–\nfalse easting / northing\n\n\n\nOther constructors in the interface:\n\n\n\nConstructor\nBuilds a grid from…\n\n\n\n\ngrid_init_from_opts\nexplicit options (above)\n\n\ngrid_init_from_par\na parameter file (filename)\n\n\ngrid_init_from_grid\nanother grid (copy + override axes)\n\n\ngrid_init_from_points\nan existing points_class\n\n\n\n\nExamples\n! Global 2° lat-lon grid\ncall grid_init(g, name=\"CCSM3-T42\", mtype=\"latlon\", units=\"degrees\", &\n               x0=0.d0, dx=2.d0, nx=180, y0=-90.d0, dy=2.d0, ny=90)\n\n! Regional oblique-stereographic grid over Greenland\ncall grid_init(g, name=\"GRL-20KM\", mtype=\"stereographic\", units=\"kilometers\", &\n               dx=20.d0, nx=76, dy=20.d0, ny=151, &\n               lambda=-40.d0, phi=72.d0, alpha=7.5d0)",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#building-a-point-set-points_init",
+    "href": "api/coordinates.html#building-a-point-set-points_init",
+    "title": "Coordinates — points & grids",
+    "section": "Building a point set — points_init",
+    "text": "Building a point set — points_init\nGeneric interface with five constructors. From options:\nsubroutine points_init_from_opts(pts, name, mtype, units, &\n                                 planet, lon180, &\n                                 x, y, dx, dy, &\n                                 lambda, phi, alpha, x_e, y_n, &\n                                 latlon, verbose)\nx(:) and y(:) are the required location vectors. If latlon=.TRUE. the supplied x,y are interpreted as lon,lat. Per-point dx,dy may be supplied for conservative remapping. The other constructors mirror grid_init:\n\n\n\nConstructor\nBuilds points from…\n\n\n\n\npoints_init_from_opts\nexplicit x,y vectors + options\n\n\npoints_init_from_par\na parameter file\n\n\npoints_init_from_file\na data file (with skip header lines)\n\n\npoints_init_from_points\nanother point set\n\n\npoints_init_from_grid\na grid",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#converting-between-representations",
+    "href": "api/coordinates.html#converting-between-representations",
+    "title": "Coordinates — points & grids",
+    "section": "Converting between representations",
+    "text": "Converting between representations\nsubroutine grid_to_points(grid, pts, mask_pack, define)   ! 2D grid -&gt; 1D points\nsubroutine points_to_grid(pts, grid, mask_pack, define)   ! 1D points -&gt; 2D grid\nmask_pack(:,:) (optional, logical) restricts the conversion to selected cells — this is how the library works with sparse subsets of a grid. define controls whether the target object’s metadata is (re)initialised.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#allocation-comparison-helpers",
+    "href": "api/coordinates.html#allocation-comparison-helpers",
+    "title": "Coordinates — points & grids",
+    "section": "Allocation & comparison helpers",
+    "text": "Allocation & comparison helpers\ncall grid_allocate(grid, var)      ! allocate var to grid shape; generic over\n                                   ! integer / float / double / logical\ncall points_allocate(pts, var)     ! same, for a point set\n\nlogical = compare_coord(pts1, pts2)   ! do two sets share a coordinate system?\nlogical = compare_coord(grid1, grid2)\ngrid_allocate / points_allocate are the idiomatic way to size a field array to match a grid or point set without restating dimensions.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#nearest-point",
+    "href": "api/coordinates.html#nearest-point",
+    "title": "Coordinates — points & grids",
+    "section": "Nearest point",
+    "text": "Nearest point\nidx = pts_which_nearest(pts, x, y, latlon)   ! index of nearest point to (x,y)",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#cell-areas",
+    "href": "api/coordinates.html#cell-areas",
+    "title": "Coordinates — points & grids",
+    "section": "Cell areas",
+    "text": "Cell areas\nCell area is computed when a grid is initialised (grid_area, coordinates.f90:141). For each cell the four corner vertices are constructed (extending by the cell spacing at boundaries, midpoints in the interior) and the area is integrated:\n\nCartesian grids → shoelace formula in the working units (cartesian_area).\nProjected grids → each corner is inverse-projected to lon/lat, then the spherical/ellipsoidal polygon area is integrated (planet_area, using GeographicLib).\nLat-lon grids → planet_area directly on the lon/lat corners.\n\nAreas are divided by xy_conv² so they end up in the grid’s own units. For a bare points_class (no grid structure) area defaults to 1.0 until set by a grid_to_points conversion.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/coordinates.html#io-printing",
+    "href": "api/coordinates.html#io-printing",
+    "title": "Coordinates — points & grids",
+    "section": "I/O & printing",
+    "text": "I/O & printing\ncall grid_write(grid, filename, ...)     ! write grid coordinates to NetCDF\ncall points_write(pts, filename, ...)\ncall grid_print(grid)                     ! summary to stdout\ncall points_print(pts)",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Coordinates — points & grids"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html",
+    "href": "api/helpers.html",
+    "title": "Helper modules",
+    "section": "",
+    "text": "Beyond the core geometry and mapping, the library bundles a set of general-purpose modules for interpolation, filtering, polygon tests, and subsetting. They are all re-exported through the umbrella coord module.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html#interpolation",
+    "href": "api/helpers.html#interpolation",
+    "title": "Helper modules",
+    "section": "Interpolation",
+    "text": "Interpolation\n\ninterp1D — 1D interpolation\n\n\n\n\n\n\n\nRoutine\nMethod\n\n\n\n\ninterp_linear(x, y, xout)\npiecewise linear (scalar or vector xout), with edge extrapolation\n\n\ninterp_spline(x, y, xout)\nnatural cubic spline\n\n\ninterp_align(x, y, xout, missing_value, tol)\nnearest-match alignment within tolerance\n\n\n\n\n\ninterp2D — 2D interpolation & gap-filling on structured grids\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\ninterp_bilinear(x, y, z, xout, yout)\nbilinear interpolation with missing-value handling\n\n\ninterp_nearest(x, y, z, xout, yout)\nnearest-neighbor\n\n\ninterp_nearest_fast(x, y, z, xout, yout, max_dist_fac)\nnearest-neighbor with a distance cutoff\n\n\nfill_weighted / fill_nearest / fill_mean(z, missing_value)\nfill missing cells from neighbors\n\n\nfill_poisson(var2d, missing_value, method, wraplon)\nfill by Poisson relaxation\n\n\nfilter_poisson(var2d, mask, tol, missing_value, wrapx)\nPoisson smoothing over a mask\n\n\ndiffuse(z, iter, missing_value)\ndiffusive smoothing/fill\n\n\nlimit_gradient(z, dx, dy, grad_lim, iter_max)\nclamp local gradients\n\n\n\n\n\ninterp_time — temporal interpolation\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\ntime_average(var)\naverage along the time axis (2D/3D/4D interfaces)\n\n\nconvert_monthly_daily_*(mon, day, days)\nspline-expand 12 monthly values to daily, cycling Dec↔︎Jan",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html#filtering-smoothing",
+    "href": "api/helpers.html#filtering-smoothing",
+    "title": "Helper modules",
+    "section": "Filtering & smoothing",
+    "text": "Filtering & smoothing\n\ngaussian_filter\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\nfilter_gaussian(var, sigma, dx, mask, truncate)\nmasked Gaussian smoothing (reference)\n\n\nfilter_gaussian_fast(var, sigma, dx, mask)\nfaster padded variant\n\n\ngaussian_kernel(sigma, kernel, truncate)\nbuild a Gaussian kernel\n\n\nconvolve(input, weights, output, mask)\nmasked convolution (reflection tiling)\n\n\ndiffuse2D(input, output, dx, mask)\nfive-point Laplacian diffusion\n\n\nhgrad(u0, dx, norm)\nhorizontal gradient magnitude\n\n\n\n\n\nloess\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\nloess_smooth(x, y, L, missing_value)\nlocally-weighted (LOWESS) 1D smoothing, robust to outliers; handles uneven spacing and missing values via internal regular-grid interpolation",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html#geometry",
+    "href": "api/helpers.html#geometry",
+    "title": "Helper modules",
+    "section": "Geometry",
+    "text": "Geometry\n\npolygons — point-in-polygon\nRay-casting point-in-polygon tests over a polygon type built from vertex arrays:\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\ncreate_polygon(pts) / create_polygon(xx, yy)\nbuild a polygon\n\n\npoint_in_polygon(x, y, pol)\nsingle-point test\n\n\npoints_1D_is_inside_poly / points_2D_is_inside_poly\nvectorised tests\n\n\npoint_is_inside_points, points_*_is_inside_points\ntest against raw vertex arrays\n\n\n\nThese are used by the subgrid-sampling conservative remapping and for clipping polygon datasets to a domain.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html#subsetting-multigrid",
+    "href": "api/helpers.html#subsetting-multigrid",
+    "title": "Helper modules",
+    "section": "Subsetting & multigrid",
+    "text": "Subsetting & multigrid\n\nsubset / subset2 — sparse / downsampled grid representations\nA subset_class couples a high-resolution grid, a packing mask, and the maps between a packed 1D point representation and the full 2D grid. This lets you work on a sparse or coarsened subset of a grid and map back losslessly.\n\n\n\n\n\n\n\nRoutine\nPurpose\n\n\n\n\nsubset_init(sub, grid, npts, factor, …)\nbuild a subset at a given refinement factor\n\n\nsubset_redefine(sub, …, mask_pack, …)\nredefine the active points from a mask\n\n\nsubset_to_grid(sub, var1D, var2D, mask_pack)\nunpack points → grid\n\n\nsubset_to_points(sub, var2D, var1D, mask_pack)\npack grid → points\n\n\nsubset_gen_mask(mask_pack, var, npts, min_spacing, method)\nbuild a spacing-based mask\n\n\n\nsubset2 adds separate to/from-subset maps and a sigma option for weighted mapping.\n\n\ngrid_gen — multigrid hierarchies\nmultigrid_init(mgrid, grid, dx) builds a stack of progressively coarser grids (validating integer coarsening ratios) and the map_init maps between levels, for hierarchical/multigrid workflows.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html#vertical-coordinate",
+    "href": "api/helpers.html#vertical-coordinate",
+    "title": "Helper modules",
+    "section": "Vertical coordinate",
+    "text": "Vertical coordinate\n\ncoordinates_sigma\npoints_sigma_init(pts, name, units) defines a 0→1 sigma vertical coordinate (equidistant or exponentially deformed). Currently partial — points_sigma_update is a stub.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/helpers.html#index-utilities",
+    "href": "api/helpers.html#index-utilities",
+    "title": "Helper modules",
+    "section": "Index utilities",
+    "text": "Index utilities\n\nindex\nSmall array helpers used throughout: which(x, ind) (R-style boolean → index), unique_dble / unique_float (unique values within a tolerance), maxcount (weighted mode). Note: unique_* and maxcount are O(n²) and index provides no spatial-search structure — the neighbor search in coordinates_mapping is brute force. See Improvements.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Helper modules"
+    ]
+  },
+  {
+    "objectID": "api/mapping.html",
+    "href": "api/mapping.html",
+    "title": "Mapping — map_init & map_field",
+    "section": "",
+    "text": "Module: coordinates_mapping (src/coordinates_mapping.f90). This is the core of the library: build a reusable mapping between two domains, then apply it to any number of fields.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Mapping — map_init & map_field"
+    ]
+  },
+  {
+    "objectID": "api/mapping.html#types",
+    "href": "api/mapping.html#types",
+    "title": "Mapping — map_init & map_field",
+    "section": "Types",
+    "text": "Types\n\nmap_class\ntype map_class\n    character(len=128) :: name1, name2     ! source, target names\n    character(len=128) :: mtype, units\n    type(planet_class) :: planet\n\n    logical :: is_cartesian, is_projection, is_same_map, is_lon180\n    type(projection_class) :: proj\n\n    logical :: is_grid\n    type(grid_axis_class) :: G             ! used when is_grid\n\n    integer :: npts                         ! number of TARGET points\n    real(dp), allocatable :: x(:), y(:), lon(:), lat(:)\n    real(dp) :: xy_conv\n\n    integer :: nmax                         ! max neighbors stored per target point\n    integer, allocatable :: nn(:)\n    type(pt_wts_class), allocatable :: map(:)   ! per-target neighbor structure\nend type\n\n\npt_wts_class — the per-target neighbor record\ntype pt_wts_class\n    integer :: n                                    ! number of neighbors\n    integer,  allocatable :: i(:), quadrant(:), border(:)\n    real(sp), allocatable :: x(:), y(:), dist(:), weight(:), area(:)\n    ! bilinear only:\n    integer,  allocatable :: iquad(:)               ! the 4 quadrant neighbors\n    real(sp), allocatable :: alpha1(:), alpha2(:), alpha3(:)\nend type\n\ni — source-point indices.\ndist — geodesic or Cartesian distance to each neighbor.\nweight — Shepard inverse-distance weight, 1 / dist^p with p = 2.\narea — conservative overlap-area weight (computed but not used by the standard map_field methods; see Conservative).\nquadrant — which of the 4 quadrants (I–IV) the neighbor lies in relative to the target, used by the quadrant method and bilinear.\nalpha1/2/3, iquad — precomputed bilinear coefficients and corner indices.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Mapping — map_init & map_field"
+    ]
+  },
+  {
+    "objectID": "api/mapping.html#map_init",
+    "href": "api/mapping.html#map_init",
+    "title": "Mapping — map_init & map_field",
+    "section": "map_init",
+    "text": "map_init\nGeneric interface with four overloads covering every source/target combination:\ncall map_init(map, grid1, grid2,  max_neighbors [, lat_lim, dist_max, fldr, load, save])\ncall map_init(map, grid1, pts2,   max_neighbors [, ...])\ncall map_init(map, pts1,  grid2,  max_neighbors [, ...])\ncall map_init(map, pts1,  pts2,   max_neighbors [, ...])\n\n\n\nArgument\nDefault\nMeaning\n\n\n\n\nmap (out)\n–\nmapping object to fill\n\n\nsource, target\n–\nany grid_class / points_class pair\n\n\nmax_neighbors\n–\nmax source neighbors stored per target point\n\n\nlat_lim\n5.0°\nlatitude pre-filter half-window for the search\n\n\ndist_max\nlarge\nhard distance cutoff for accepting a neighbor\n\n\nfldr\n\"maps\"\ndirectory for the cached NetCDF map file\n\n\nload\n.TRUE.\nload the cached map if it exists\n\n\nsave\n.TRUE.\nwrite the map to cache after computing\n\n\n\nAll four overloads convert their arguments to point sets and delegate to map_init_internal (coordinates_mapping.f90:185), which calls map_calc_weights to do the search.\n\nCaching\nThe map is written to &lt;fldr&gt;/map_&lt;name1&gt;_&lt;name2&gt;_&lt;nmax&gt;.nc. On the next run with the same names and max_neighbors, map_init loads it instead of recomputing. Because neighbor distances are stored, the cached map supports any of the map_field methods without rebuilding. See Map file formats.\n\n\n\n\n\n\nWarningThis is the slow step\n\n\n\nmap_calc_weights (coordinates_mapping.f90:450) is a brute-force O(n_source × n_target) double loop with a latitude pre-filter and per-insertion cshift of the neighbor arrays — no spatial index. On large grids the first build can take minutes. The cache hides this on subsequent runs, but the improvement proposal replaces it with a KD-tree.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Mapping — map_init & map_field"
+    ]
+  },
+  {
+    "objectID": "api/mapping.html#map_field",
+    "href": "api/mapping.html#map_field",
+    "title": "Mapping — map_init & map_field",
+    "section": "map_field",
+    "text": "map_field\nGeneric over element type (double / float / integer) and over grid/point source & target — 12 overloads, all delegating to map_field_points_points_double (coordinates_mapping.f90:1731):\nsubroutine map_field(map, name, var1, var2, mask2, method, &\n                     radius, border, missing_value, mask_pack)\n\n\n\n\n\n\n\nArgument\nMeaning\n\n\n\n\nmap\nthe mapping from map_init\n\n\nname\nfield name (for messages)\n\n\nvar1\nsource field (shape matches the source grid/points)\n\n\nvar2 (inout)\ntarget field (shape matches target)\n\n\nmask2 (out, opt)\nwhich target points were successfully filled\n\n\nmethod\ninterpolation method (table below)\n\n\nradius (opt)\ndistance limit applied at apply-time\n\n\nborder (opt)\nalso fill target border points\n\n\nmissing_value (opt)\nvalue treated as missing in var1 / written where unfilled\n\n\nmask_pack (opt)\nrestrict interpolation to selected target points\n\n\n\n\nMethods\n\n\n\n\n\n\n\n\nmethod\nBehaviour\nNeighbors used\n\n\n\n\n\"nn\" / \"nearest\"\nnearest-neighbor value\n1\n\n\n\"bilinear\"\nbilinear from the 4 quadrant neighbors (precomputed α)\n4\n\n\n\"quadrant\"\ninverse-distance average of the nearest neighbor in each quadrant\n≤4\n\n\n\"radius\" / \"shepard\"\ninverse-distance (Shepard, p=2) average of all neighbors within radius\n≤ nmax\n\n\n\nThe weighting itself is var2 = Σ wᵢ·varᵢ / Σ wᵢ over the (optionally quadrant-restricted) neighbor set, skipping missing values (weighted_ave). Bilinear evaluates p₁ = z₂ + α₁(z₁−z₂), p₀ = z₃ + α₂(z₄−z₃), var = p₀ + α₃(p₁−p₀).\n\n\nExample\ncall map_field(map1, \"t2m\", t2m_src, t2m_dst, mask_map, method=\"quadrant\", &\n               missing_value=-9999.d0)",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Mapping — map_init & map_field"
+    ]
+  },
+  {
+    "objectID": "api/mapping.html#inspecting-comparing-maps",
+    "href": "api/mapping.html#inspecting-comparing-maps",
+    "title": "Mapping — map_init & map_field",
+    "section": "Inspecting & comparing maps",
+    "text": "Inspecting & comparing maps\ncall map_print(map)              ! npts, neighbor vector length, memory size\nlogical = compare_map(map1, grid2)   ! does an existing map target this grid?",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Mapping — map_init & map_field"
+    ]
+  },
+  {
+    "objectID": "api/mapping.html#dependencies",
+    "href": "api/mapping.html#dependencies",
+    "title": "Mapping — map_init & map_field",
+    "section": "Dependencies",
+    "text": "Dependencies\ncoordinates_mapping builds on coordinates, planet (distances, quadrants, areas, weighted averages), oblimap_projection_module, polygons (for the conservative area weights), ncio (cache I/O), gaussian_filter, interp2D, and index.",
+    "crumbs": [
+      "Overview",
+      "API",
+      "Mapping — map_init & map_field"
+    ]
+  },
+  {
+    "objectID": "reference/projections.html",
+    "href": "reference/projections.html",
+    "title": "Projections & planets",
+    "section": "",
+    "text": "Module: oblimap_projection_module (src/projection_oblimap2.f90), ported from OBLIMAP2 (Reerink et al., 2010, Geosci. Model Dev.). Projections convert between geographic (lon, lat) and projected Cartesian (x, y) coordinates.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Projections & planets"
+    ]
+  },
+  {
+    "objectID": "reference/projections.html#supported-mtype-values",
+    "href": "reference/projections.html#supported-mtype-values",
+    "title": "Projections & planets",
+    "section": "Supported mtype values",
+    "text": "Supported mtype values\n\n\n\n\n\n\n\n\nmtype string\nProjected?\nNotes\n\n\n\n\nlatitude_longitude / latlon / gaussian\nno\ngeographic; x,y ≡ lon,lat\n\n\ncartesian\nno (generic)\nplain planar coordinates, Euclidean distance\n\n\nstereographic / polar_stereographic\nyes\noblique & polar stereographic\n\n\nlambert_azimuthal_equal_area\nyes\noblique Lambert azimuthal equal-area\n\n\n\nProjected types are realised in both spherical and ellipsoidal (Snyder) forms, selected automatically from the chosen planet:\n\n\n\n\n\n\n\n\nFamily\nSphere method\nEllipsoid method\n\n\n\n\nStereographic (oblique)\noblique_sg_projection\noblique_sg_projection_ellipsoid_snyder\n\n\nStereographic (polar special case)\n—\npolar_sg_projection_ellipsoid_snyder\n\n\nLambert azimuthal equal-area\noblique_laea_projection_snyder\noblique_laea_projection_ellipsoid_snyder",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Projections & planets"
+    ]
+  },
+  {
+    "objectID": "reference/projections.html#projection-parameters",
+    "href": "reference/projections.html#projection-parameters",
+    "title": "Projections & planets",
+    "section": "Projection parameters",
+    "text": "Projection parameters\nStored in projection_class; set via grid_init / points_init arguments of the same name. All angles in degrees.\n\n\n\n\n\n\n\nParameter\nMeaning\n\n\n\n\nlambda\nlongitude of the projection centre (central meridian)\n\n\nphi\nlatitude of the projection centre (standard parallel)\n\n\nalpha\noblique tangent angle — where the projection plane slices the sphere\n\n\nx_e\nfalse easting (x offset)\n\n\ny_n\nfalse northing (y offset)\n\n\n\nalpha controls the plane’s intersection with the spherical surface: the smaller the domain, the smaller the alpha that minimises distortion. A helper optimal_alpha(R, nx, ny, dx, dy) estimates a good value for given grid dimensions.\n\nTypical regional setups (Reerink et al., 2010)\n\n\n\nDomain\nlambda\nphi\nalpha\n\n\n\n\nGreenland\n320° (= −40°)\n72°\n7.5°\n\n\nAntarctica\n0°\n−90°\n19.0°\n\n\n\ncall grid_init(gGRL, name=\"GRL-20KM\", mtype=\"stereographic\", units=\"kilometers\", &\n               dx=20.d0, nx=76, dy=20.d0, ny=151, &\n               lambda=-40.d0, phi=72.d0, alpha=7.5d0)",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Projections & planets"
+    ]
+  },
+  {
+    "objectID": "reference/projections.html#forward-inverse-transforms",
+    "href": "reference/projections.html#forward-inverse-transforms",
+    "title": "Projections & planets",
+    "section": "Forward & inverse transforms",
+    "text": "Forward & inverse transforms\nDispatched by the projection’s method:\n\n\n\n\n\n\n\nRoutine\nDirection\n\n\n\n\noblimap_projection(lambda, phi, x_out, y_out, proj)\nlon/lat → x/y\n\n\noblimap_projection_inverse(x, y, lambda_out, phi_out, proj)\nx/y → lon/lat\n\n\n\nSupporting routines include projection_init, same_projection (equivalence test, used by map_init to decide whether two domains share a system), optimal_alpha, and the rotation helpers rotation_projection / inverse_rotation_projection.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Projections & planets"
+    ]
+  },
+  {
+    "objectID": "reference/projections.html#planets",
+    "href": "reference/projections.html#planets",
+    "title": "Projections & planets",
+    "section": "Planets",
+    "text": "Planets\nModule: planet (src/planet.f90). A planet_class carries the semi-major axis a, eccentricity e, flattening f, mean radius R, and an is_sphere flag. Two are predefined:\n\n\n\n\n\n\n\n\nname\nShape\nParameters\n\n\n\n\n\"WGS84\"\nellipsoid\na = 6 378 137 m, f = 1/298.257223563, e = 0.0818…, R ≈ 6.37122×10⁶ m\n\n\n\"Spherical Earth\"\nsphere\nR ≈ 6.37122×10⁶ m, f ≈ 0, e = 0\n\n\n\nWGS84 is the default. Geodesic distances and polygon areas on the ellipsoid are computed with Karney’s GeographicLib (geodesic.f90); the spherical planet uses great-circle formulas.\n\nDistance & area routines\n\n\n\nRoutine\nPurpose\n\n\n\n\nplanet_distance(a, f, lon1, lat1, lon2, lat2)\ngeodesic distance\n\n\nspherical_distance(...)\ngreat-circle distance\n\n\ncartesian_distance(x1, y1, x2, y2)\nEuclidean distance\n\n\nplanet_area(a, f, lons, lats)\ngeodesic polygon area\n\n\ncartesian_area(x, y)\nplanar polygon area (shoelace)\n\n\n\n\n\n\n\n\n\nTipExtensibility\n\n\n\nAdding a planet means extending planet_init; adding a projection means adding forward/inverse routines and a method branch in projection_init / oblimap_projection. Broadening projection support (e.g. Lambert conformal, Mercator, rotated pole) is noted as a generalisation opportunity in the improvement proposal.",
+    "crumbs": [
+      "Overview",
+      "Reference",
+      "Projections & planets"
+    ]
+  }
+]
