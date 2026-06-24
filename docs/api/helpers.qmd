@@ -1,0 +1,117 @@
+---
+title: "Helper modules"
+---
+
+Beyond the core geometry and mapping, the library bundles a set of
+general-purpose modules for interpolation, filtering, polygon tests, and
+subsetting. They are all re-exported through the umbrella `coord` module.
+
+## Interpolation
+
+### `interp1D` — 1D interpolation
+
+| Routine | Method |
+|---|---|
+| `interp_linear(x, y, xout)` | piecewise linear (scalar or vector `xout`), with edge extrapolation |
+| `interp_spline(x, y, xout)` | natural cubic spline |
+| `interp_align(x, y, xout, missing_value, tol)` | nearest-match alignment within tolerance |
+
+### `interp2D` — 2D interpolation & gap-filling on structured grids
+
+| Routine | Purpose |
+|---|---|
+| `interp_bilinear(x, y, z, xout, yout)` | bilinear interpolation with missing-value handling |
+| `interp_nearest(x, y, z, xout, yout)` | nearest-neighbor |
+| `interp_nearest_fast(x, y, z, xout, yout, max_dist_fac)` | nearest-neighbor with a distance cutoff |
+| `fill_weighted / fill_nearest / fill_mean(z, missing_value)` | fill missing cells from neighbors |
+| `fill_poisson(var2d, missing_value, method, wraplon)` | fill by Poisson relaxation |
+| `filter_poisson(var2d, mask, tol, missing_value, wrapx)` | Poisson smoothing over a mask |
+| `diffuse(z, iter, missing_value)` | diffusive smoothing/fill |
+| `limit_gradient(z, dx, dy, grad_lim, iter_max)` | clamp local gradients |
+
+### `interp_time` — temporal interpolation
+
+| Routine | Purpose |
+|---|---|
+| `time_average(var)` | average along the time axis (2D/3D/4D interfaces) |
+| `convert_monthly_daily_*(mon, day, days)` | spline-expand 12 monthly values to daily, cycling Dec↔Jan |
+
+## Filtering & smoothing
+
+### `gaussian_filter`
+
+| Routine | Purpose |
+|---|---|
+| `filter_gaussian(var, sigma, dx, mask, truncate)` | masked Gaussian smoothing (reference) |
+| `filter_gaussian_fast(var, sigma, dx, mask)` | faster padded variant |
+| `gaussian_kernel(sigma, kernel, truncate)` | build a Gaussian kernel |
+| `convolve(input, weights, output, mask)` | masked convolution (reflection tiling) |
+| `diffuse2D(input, output, dx, mask)` | five-point Laplacian diffusion |
+| `hgrad(u0, dx, norm)` | horizontal gradient magnitude |
+
+### `loess`
+
+| Routine | Purpose |
+|---|---|
+| `loess_smooth(x, y, L, missing_value)` | locally-weighted (LOWESS) 1D smoothing, robust to outliers; handles uneven spacing and missing values via internal regular-grid interpolation |
+
+## Geometry
+
+### `polygons` — point-in-polygon
+
+Ray-casting point-in-polygon tests over a `polygon` type built from vertex
+arrays:
+
+| Routine | Purpose |
+|---|---|
+| `create_polygon(pts)` / `create_polygon(xx, yy)` | build a polygon |
+| `point_in_polygon(x, y, pol)` | single-point test |
+| `points_1D_is_inside_poly / points_2D_is_inside_poly` | vectorised tests |
+| `point_is_inside_points`, `points_*_is_inside_points` | test against raw vertex arrays |
+
+These are used by the subgrid-sampling
+[conservative remapping](conservative.qmd) and for clipping polygon datasets to
+a domain.
+
+## Subsetting & multigrid
+
+### `subset` / `subset2` — sparse / downsampled grid representations
+
+A `subset_class` couples a high-resolution grid, a packing mask, and the maps
+between a packed 1D point representation and the full 2D grid. This lets you
+work on a sparse or coarsened subset of a grid and map back losslessly.
+
+| Routine | Purpose |
+|---|---|
+| `subset_init(sub, grid, npts, factor, …)` | build a subset at a given refinement factor |
+| `subset_redefine(sub, …, mask_pack, …)` | redefine the active points from a mask |
+| `subset_to_grid(sub, var1D, var2D, mask_pack)` | unpack points → grid |
+| `subset_to_points(sub, var2D, var1D, mask_pack)` | pack grid → points |
+| `subset_gen_mask(mask_pack, var, npts, min_spacing, method)` | build a spacing-based mask |
+
+`subset2` adds separate to/from-subset maps and a `sigma` option for weighted
+mapping.
+
+### `grid_gen` — multigrid hierarchies
+
+`multigrid_init(mgrid, grid, dx)` builds a stack of progressively coarser grids
+(validating integer coarsening ratios) and the `map_init` maps between levels,
+for hierarchical/multigrid workflows.
+
+## Vertical coordinate
+
+### `coordinates_sigma`
+
+`points_sigma_init(pts, name, units)` defines a 0→1 sigma vertical coordinate
+(equidistant or exponentially deformed). Currently partial — `points_sigma_update`
+is a stub.
+
+## Index utilities
+
+### `index`
+
+Small array helpers used throughout: `which(x, ind)` (R-style boolean → index),
+`unique_dble` / `unique_float` (unique values within a tolerance), `maxcount`
+(weighted mode). Note: `unique_*` and `maxcount` are O(n²) and `index` provides
+**no** spatial-search structure — the neighbor search in `coordinates_mapping`
+is brute force. See [Improvements](../improvements.qmd).

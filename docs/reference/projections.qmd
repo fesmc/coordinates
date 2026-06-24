@@ -1,0 +1,105 @@
+---
+title: "Projections & planets"
+---
+
+Module: `oblimap_projection_module` (`src/projection_oblimap2.f90`), ported from
+[OBLIMAP2](https://github.com/iceage-group/oblimap) (Reerink et al., 2010,
+*Geosci. Model Dev.*). Projections convert between geographic (`lon`, `lat`)
+and projected Cartesian (`x`, `y`) coordinates.
+
+## Supported `mtype` values
+
+| `mtype` string | Projected? | Notes |
+|---|---|---|
+| `latitude_longitude` / `latlon` / `gaussian` | no | geographic; `x,y` ≡ `lon,lat` |
+| `cartesian` | no (generic) | plain planar coordinates, Euclidean distance |
+| `stereographic` / `polar_stereographic` | yes | oblique & polar stereographic |
+| `lambert_azimuthal_equal_area` | yes | oblique Lambert azimuthal equal-area |
+
+Projected types are realised in both **spherical** and **ellipsoidal (Snyder)**
+forms, selected automatically from the chosen [planet](#planets):
+
+| Family | Sphere method | Ellipsoid method |
+|---|---|---|
+| Stereographic (oblique) | `oblique_sg_projection` | `oblique_sg_projection_ellipsoid_snyder` |
+| Stereographic (polar special case) | — | `polar_sg_projection_ellipsoid_snyder` |
+| Lambert azimuthal equal-area | `oblique_laea_projection_snyder` | `oblique_laea_projection_ellipsoid_snyder` |
+
+## Projection parameters
+
+Stored in `projection_class`; set via `grid_init` / `points_init` arguments of
+the same name. All angles in degrees.
+
+| Parameter | Meaning |
+|---|---|
+| `lambda` | longitude of the projection centre (central meridian) |
+| `phi` | latitude of the projection centre (standard parallel) |
+| `alpha` | oblique tangent angle — where the projection plane slices the sphere |
+| `x_e` | false easting (x offset) |
+| `y_n` | false northing (y offset) |
+
+`alpha` controls the plane's intersection with the spherical surface: the
+smaller the domain, the smaller the `alpha` that minimises distortion. A helper
+`optimal_alpha(R, nx, ny, dx, dy)` estimates a good value for given grid
+dimensions.
+
+### Typical regional setups (Reerink et al., 2010)
+
+| Domain | `lambda` | `phi` | `alpha` |
+|---|---|---|---|
+| Greenland | 320° (= −40°) | 72° | 7.5° |
+| Antarctica | 0° | −90° | 19.0° |
+
+```fortran
+call grid_init(gGRL, name="GRL-20KM", mtype="stereographic", units="kilometers", &
+               dx=20.d0, nx=76, dy=20.d0, ny=151, &
+               lambda=-40.d0, phi=72.d0, alpha=7.5d0)
+```
+
+## Forward & inverse transforms
+
+Dispatched by the projection's `method`:
+
+| Routine | Direction |
+|---|---|
+| `oblimap_projection(lambda, phi, x_out, y_out, proj)` | lon/lat → x/y |
+| `oblimap_projection_inverse(x, y, lambda_out, phi_out, proj)` | x/y → lon/lat |
+
+Supporting routines include `projection_init`, `same_projection` (equivalence
+test, used by `map_init` to decide whether two domains share a system),
+`optimal_alpha`, and the rotation helpers `rotation_projection` /
+`inverse_rotation_projection`.
+
+## Planets
+
+Module: `planet` (`src/planet.f90`). A `planet_class` carries the semi-major
+axis `a`, eccentricity `e`, flattening `f`, mean radius `R`, and an `is_sphere`
+flag. Two are predefined:
+
+| `name` | Shape | Parameters |
+|---|---|---|
+| `"WGS84"` | ellipsoid | `a = 6 378 137 m`, `f = 1/298.257223563`, `e = 0.0818…`, `R ≈ 6.37122×10⁶ m` |
+| `"Spherical Earth"` | sphere | `R ≈ 6.37122×10⁶ m`, `f ≈ 0`, `e = 0` |
+
+`WGS84` is the default. Geodesic distances and polygon areas on the ellipsoid
+are computed with Karney's GeographicLib (`geodesic.f90`); the spherical planet
+uses great-circle formulas.
+
+### Distance & area routines
+
+| Routine | Purpose |
+|---|---|
+| `planet_distance(a, f, lon1, lat1, lon2, lat2)` | geodesic distance |
+| `spherical_distance(...)` | great-circle distance |
+| `cartesian_distance(x1, y1, x2, y2)` | Euclidean distance |
+| `planet_area(a, f, lons, lats)` | geodesic polygon area |
+| `cartesian_area(x, y)` | planar polygon area (shoelace) |
+
+::: {.callout-tip}
+## Extensibility
+Adding a planet means extending `planet_init`; adding a projection means adding
+forward/inverse routines and a `method` branch in `projection_init` /
+`oblimap_projection`. Broadening projection support (e.g. Lambert conformal,
+Mercator, rotated pole) is noted as a generalisation opportunity in the
+[improvement proposal](../improvements.qmd).
+:::

@@ -1,0 +1,93 @@
+---
+title: "Conservative remapping"
+---
+
+Conservative remapping preserves the area-integral of a field when moving
+between grids — essential for fluxes, mass, and any quantity that must be
+globally conserved. The library implements it in-house by **subgrid point
+sampling**, and also offers an external [CDO/SCRIP path](scrip-cdo.qmd) that is
+preferred in practice for large grids.
+
+Modules:
+
+- `interp2D_conservative` (`src/interp2D_conservative.f90`) — the primary
+  in-house implementation.
+- `coordinates_mapping_conservative` (`src/coordinates_mapping_conservative.f90`)
+  — an alternative field-application routine over precomputed weights.
+- `coordinates_mapping.f90:758` — a third copy (`calc_weights_interpconserv1`)
+  embedded in the main mapping module.
+
+::: {.callout-note}
+There are three overlapping conservative code paths and two separate
+`pt_wts_class` / `calc_grid_total` definitions across these modules. Unifying
+them is part of the [improvement proposal](../improvements.qmd).
+:::
+
+## Public API
+
+| Routine | Module | Purpose |
+|---|---|---|
+| `map_conservative_init(map, grid1, grid2)` | interp2D_conservative | build overlap-area weights grid1→grid2 |
+| `map_field_conservative_map(map, varname, var1, var2, fill, missing_value, mask_pack)` | interp2D_conservative | apply weights (area-weighted mean) |
+| `map_field_conservative_grid(grid1, grid2, varname, var1, var2, …)` | interp2D_conservative | one-shot init+apply between two grids |
+| `map_field_conservative_smooth(map, map_hilo, grid1, grid2, …)` | interp2D_conservative | conservative + smoothing variant |
+| `interpconserv1_weights(x, y, dx, dy, xout, yout, dxout, dyout, latlon)` | interp2D_conservative | overlap area of source cells with one target cell |
+| `map_field_conservative_map1(mp, varname, var1, var2, method, …)` | …_conservative | apply weights with `method` = mean/count/stdev |
+| `calc_grid_total(x, y, var, xlim, ylim)` | both | area-integral of a field over a region |
+
+## How the weights are computed (subgrid sampling)
+
+For each target cell, the overlap area contributed by each nearby source cell
+is estimated by dicing the source cell into a regular grid of sample points and
+counting how many fall inside the target cell polygon
+(`interpconserv1_weights`, `interp2D_conservative.f90:504`):
+
+```fortran
+! Target cell as a rectangular polygon
+pol = create_polygon([xout±dxout/2], [yout±dyout/2])
+
+! For each candidate source cell, sample nx×ny subgrid points
+nx = max(1, int(dx/dxout))      ! (the copy in coordinates_mapping.f90 uses max(5, …))
+ny = max(1, int(dy/dyout))
+do j = 1, ny
+  do i = 1, nx
+     x1 = (x-dx/2) + dx*(i-0.5)/nx
+     y1 = (y-dy/2) + dy*(j-0.5)/ny
+     if (point_in_polygon(x1, y1, pol)) npts_in = npts_in + 1
+  end do
+end do
+
+! Overlap area  ≈  (fraction of points inside) × source cell area
+area(now) = dble(npts_in)/dble(nx*ny) * dx*dy
+```
+
+The candidate source cells are found with an axis-aligned bounding-box scan
+(`which(...)`, a linear pass over all source points) sized by the coarser of
+the two cell spacings.
+
+### Applying the weights
+
+```fortran
+! area-weighted mean, skipping missing source values
+var2(i) = sum(var1(ii)*area, mask=area>0) / sum(area, mask=area>0)
+```
+
+`map_field_conservative_map1` additionally offers `method="count"` (modal /
+most-frequent value, weighted by area) and `method="stdev"` (area-weighted
+standard deviation).
+
+## Cost and limitations
+
+| Property | Status |
+|---|---|
+| Accuracy | approximate — error ∝ 1/(subgrid points); a step function of the resolution ratio |
+| Cost per target cell | O(n_neighbors × nx × ny × cost(point-in-polygon)) |
+| Resolution-ratio scaling | `nx,ny ∝ dx/dxout`, so cost grows ~quadratically with the ratio (up to ~31×31 sub-points) |
+| Lon-lat support | **not supported** in the embedded copy (`coordinates_mapping.f90:782`); assumes planar rectangular cells |
+| Neighbor search | bounding-box linear scan, no spatial index |
+
+This is why, for production conservative remapping on large grids, the library
+shells out to `cdo` (which uses YAC's analytic spherical clipping). The
+[improvement proposal](../improvements.qmd) replaces the subgrid sampling with
+analytic polygon clipping so the in-house path matches CDO's accuracy and
+speed, and drops the external dependency.

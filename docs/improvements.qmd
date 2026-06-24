@@ -1,0 +1,305 @@
+---
+title: "Improvement proposal"
+subtitle: "Fast in-house weights without the CDO dependency"
+---
+
+This is a focused design document for modernising the two operations that
+dominate cost — the **neighbor search** and the **conservative weight
+calculation** — plus a set of structural cleanups. The non-negotiable
+constraint is that the user-facing API stays put: `map_init` and `map_field`
+keep their current signatures and semantics. Everything proposed here is an
+*internal* replacement that those two routines call into.
+
+## Goals & constraints
+
+| Goal | Constraint |
+|---|---|
+| Neighbor search in seconds, not minutes, on large grids | `map_init(map, src, dst, max_neighbors, …)` signature unchanged |
+| Conservative weights computed analytically in-house | `map_field(map, name, v1, v2, method=…)` signature unchanged |
+| Drop the runtime `cdo` / YAC dependency for conservative remapping | existing cached map files should still load (or migrate cleanly) |
+| Lon-lat conservative remapping supported (currently planar-only) | results match CDO/YAC to round-off on test cases |
+
+The yardstick is YAC: it computes mapping weights in seconds where the current
+brute-force + subgrid approach takes minutes. The two ideas that get us there
+are a **spatial index** (KD-tree) for the search and **analytic polygon
+clipping** for conservative overlap areas — exactly the building blocks YAC
+uses.
+
+---
+
+## 1. KD-tree neighbor search
+
+### Problem
+
+`map_calc_weights` (`coordinates_mapping.f90:450`) is:
+
+```text
+for each target point i in 1..M:          ! M target points
+   for each source point j in 1..N:       ! N source points  -> O(N·M)
+       if |lat_j - lat_i| < lat_lim:       ! weak pre-filter
+           d = distance(i, j)
+           insert-sorted into neighbor list ! cshift = O(nmax) per insert
+```
+
+Complexity is **O(N·M)** distance evaluations (the latitude band only shaves a
+constant factor), and each accepted neighbor triggers an O(`nmax`) array shift.
+For two ~10⁶-cell grids this is the minutes-long step. It is OpenMP-parallel
+over targets, which helps but does not change the asymptotics.
+
+### Design
+
+Build one **KD-tree over the source points**, then query *k* nearest neighbors
+per target point.
+
+- **Build:** O(N log N), once per `map_init`.
+- **Query:** O(log N + k) per target → **O(M·(log N + k))** total. For
+  N = M = 10⁶ this is ~10⁴× fewer distance evaluations than the double loop.
+- **Parallel:** queries are independent → OpenMP over targets, as today.
+
+#### Handling the sphere
+
+The subtlety is that "nearest" must respect geodesic distance and wrap across
+the ±180° seam and the poles. The clean, standard trick is to **embed lon/lat
+on the unit sphere in 3D** and build the KD-tree in (x,y,z):
+
+```fortran
+xyz = [ cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat) ]
+```
+
+Chord distance in 3D is monotonic in great-circle distance, so the *k* nearest
+in 3D Euclidean space are exactly the *k* nearest geodesically. This removes all
+seam/pole special-casing for free, and it unifies the three current cases —
+lon-lat, same-projection Cartesian, cross-projection — into one tree:
+
+| Case | Tree coordinates |
+|---|---|
+| same Cartesian / same projection | the projected `x, y` (optionally `z=0`) |
+| lon-lat or cross-projection | the 3D unit-sphere embedding above |
+
+After the *k* candidates are found, the **exact geodesic distance** (or
+Cartesian distance for the projected case) is computed once per candidate using
+the existing `planet_distance` / `cartesian_distance`, preserving today's
+numbers in `pt_wts_class%dist`. The KD-tree only changes *which* candidates are
+evaluated, not the distance metric stored.
+
+#### Proposed module
+
+A new self-contained module, no external deps:
+
+```fortran
+module kdtree
+  type kdtree_t
+     ! flat arrays: split dims, split values, point indices, child pointers
+  end type
+
+  ! Build from N points (2D projected or 3D sphere-embedded)
+  subroutine kdtree_build(tree, pts_xyz)          ! pts_xyz(ndim, N)
+
+  ! k nearest neighbors to a query point; returns indices + squared dists
+  subroutine kdtree_knn(tree, q_xyz, k, idx, d2, nfound)
+
+  ! all neighbors within a radius (for radius/shepard and conservative search)
+  subroutine kdtree_radius(tree, q_xyz, r, idx, d2, nfound)
+end module
+```
+
+A left-balanced array-backed KD-tree (median split on the widest dimension)
+keeps it allocation-light and cache-friendly; ~300 lines of Fortran, no
+recursion needed at query time if implemented with an explicit stack.
+
+#### Where it slots in
+
+`map_calc_weights` is rewritten as:
+
+```text
+build tree over source xyz                    ! O(N log N)
+!$omp parallel do
+for each target i:
+    kdtree_knn(tree, q_i, max_neighbors, idx, d2, n)
+    for each candidate: compute exact dist, quadrant, border, weight
+    store into map%map(i)                       ! no cshift; already k-sized
+```
+
+The sorted-insertion `cshift` logic disappears (the KNN result is already the
+*k* nearest; sort *k* items once). Quadrant assignment, border detection, and
+`weight = 1/dist^p` are unchanged. **`map_init`, the cache format, and
+`map_field` are untouched.**
+
+The same `kdtree_radius` query also replaces the bounding-box `which(...)`
+linear scan used by the conservative neighbor search (below) and by
+`interp_nearest_fast`.
+
+### Effort & risk
+
+| | |
+|---|---|
+| Effort | Medium — one new module (~300 LOC) + rewrite of `map_calc_weights` inner loop |
+| Risk | Low — drop-in; outputs validated against the existing brute-force result on test grids (bit-comparable distances, identical neighbor sets) |
+| Payoff | The headline minutes→seconds win for nn/bilinear/quadrant/shepard |
+
+---
+
+## 2. Analytic conservative weights (spherical polygon clipping)
+
+### Problem
+
+Conservative overlap areas are estimated by **subgrid point sampling**
+(`interp2D_conservative.f90:504`, `coordinates_mapping.f90:758`): each source
+cell is diced into `nx×ny` points (up to ~31²), each tested with a ray-cast
+point-in-polygon, and the overlap is the fraction inside × cell area. This is:
+
+- **approximate** — the overlap area is quantised to 1/(nx·ny);
+- **slow** — cost grows ~quadratically with the source/target resolution ratio;
+- **planar only** — the embedded copy explicitly does not support lon-lat
+  (`coordinates_mapping.f90:782`).
+
+### Design
+
+Compute each overlap area **exactly** by clipping the source cell polygon
+against the target cell polygon and integrating the area of the clipped result
+— the YAC approach.
+
+#### Step 1 — find candidate source cells
+
+Use `kdtree_radius` (from §1) around each target cell center with radius ≈ the
+target cell diagonal + max source cell diagonal. This replaces the linear
+bounding-box scan and bounds the candidate set to O(1) cells per target.
+
+#### Step 2 — clip polygons
+
+For each candidate source cell, clip it against the (convex, rectangular)
+target cell with **Sutherland–Hodgman**:
+
+```text
+clip source-polygon S against each edge E of target-polygon T:
+    keep the portion of S on T's interior side of E
+result R = clipped polygon (empty if no overlap)
+overlap_area = area(R)
+weight = overlap_area / area(T)        ! for flux-conserving "mean"
+```
+
+Sutherland–Hodgman is exact, O(|S|·|T|) per pair (here 4·4), and needs only
+**line-segment intersection + inside-edge test** — no point-in-polygon
+sampling, no ray casting. For axis-aligned rectangular cells it simplifies to
+interval overlaps, but the general clip keeps it correct for rotated/projected
+cells.
+
+#### Step 3 — planar vs spherical
+
+| Mode | Clip in… | Area via… |
+|---|---|---|
+| Cartesian / same projection | projected `x, y` plane | shoelace (`cartesian_area`) |
+| lon-lat (large cells) | on the sphere: edges are great-circle arcs; clip with spherical half-space tests | `planet_area` (geodesic, already in `planet.f90`) |
+
+The planar clip covers the common projected-grid case exactly. The spherical
+clip — replacing each Cartesian edge test with a great-circle/point-side test
+and integrating with the existing geodesic `planet_area` — is what unlocks
+correct **lon-lat conservative remapping**, which the current code lacks. This
+is precisely YAC's algorithm and is the one genuinely new piece of geometry.
+
+::: {.callout-tip}
+## Incremental path
+Ship the **planar Sutherland–Hodgman** clip first (covers projected target
+grids, the dominant use case, exactly and fast). Add the **spherical** clip as a
+second stage to retire the lon-lat gap and fully match YAC. Each stage is
+independently testable against CDO output.
+:::
+
+#### Where it slots in
+
+`map_conservative_init` keeps its signature; internally it (a) queries the
+KD-tree for candidates and (b) calls a new `cell_overlap_area(src_cell,
+dst_cell, latlon)` instead of `interpconserv1_weights`. The result fills the
+**same** `pt_wts_class%area` array, so `map_field_conservative_map` /
+`map_field_conservative_map1` apply it unchanged. `map_field(method="con")` can
+then route to this path with **no external `cdo` call**.
+
+### Effort & risk
+
+| | |
+|---|---|
+| Effort | Medium (planar) + Medium (spherical) — one `polygon_clip` module reusing `polygons`/`planet` |
+| Risk | Medium — geometry edge cases (degenerate/zero-area clips, antimeridian, poles). Mitigated by validating area conservation (Σ weights·areas) and diffing against CDO `gencon` on the existing test grids |
+| Payoff | Removes the runtime `cdo`/YAC dependency; exact (not sampled) weights; lon-lat support; orders-of-magnitude faster than subgrid sampling at high resolution ratios |
+
+---
+
+## 3. Unify the weight store and apply path
+
+Today there are **three** conservative implementations and **two** separate
+`pt_wts_class` / `calc_grid_total` definitions
+(`interp2D_conservative.f90`, `coordinates_mapping_conservative.f90`,
+`coordinates_mapping.f90`), plus a separate SCRIP `remap_matrix` representation.
+They all encode the same object: a sparse source→target weight matrix.
+
+**Proposal:** a single internal sparse-weight type, populated by every path
+(IDW, bilinear, conservative, or imported SCRIP), and one apply routine.
+
+```fortran
+type weight_map_t
+    integer :: n_src, n_dst, n_links
+    integer,  allocatable :: src(:), dst(:)   ! link addresses (SCRIP-style)
+    real(dp), allocatable :: w(:)             ! link weights
+end type
+
+! one applicator for every method
+subroutine weight_map_apply(wm, var1, var2, op, missing_value)
+    ! op = "mean" | "sum" | "count" | "stdev"
+```
+
+Benefits:
+
+- `map_field` and `map_scrip_field` share one tested kernel; `method="mean"`,
+  `"count"`, `"stdev"` live in one place instead of three.
+- The native and SCRIP map files become two serialisations of the same object —
+  one loader, one writer (see [Map file formats](reference/map-file-format.qmd)).
+- Conservative `area`, Shepard `weight`, and bilinear `alpha` all reduce to link
+  weights, so the per-method branching in `map_field` shrinks.
+
+Keep `pt_wts_class` as the *neighbor-centric* view (it carries quadrant/border
+needed during search) but derive the link arrays from it for application.
+
+| Effort | Low–Medium (mechanical consolidation + tests) |
+|---|---|
+| Risk | Low — pure refactor behind unchanged public API |
+| Payoff | Removes duplication, one place to optimise/parallelise, simpler cache code |
+
+---
+
+## 4. Smaller generalisations & cleanups
+
+| Item | Current | Proposed |
+|---|---|---|
+| **`index` utilities** | `unique_*`, `maxcount` are O(n²) | hash/sort-based O(n log n); these run inside conservative `count`/`stdev` |
+| **Projection coverage** | oblique/polar stereographic + LAEA only | add Lambert conformal, Mercator, rotated-pole behind the same `mtype`/`proj` dispatch (the OBLIMAP dispatch table makes this additive) |
+| **Planets** | hard-coded WGS84 + Spherical Earth | data-driven `planet_init` (name → params table) so other bodies/ellipsoids are one-line additions |
+| **`grid_to_cdo` wraplon bug** | `wraplon=.TRUE.` mishandles the lon=0 seam | obsolete once §2 removes the CDO path; until then, fix or guard it |
+| **Single/double precision** | `pt_wts_class` mixes `sp`/`dp`; `prec=sp` globally | make the working precision a single compile-time switch; store weights in `dp` to avoid conservative-sum drift |
+| **Bilinear as weights** | special-cased `alpha1/2/3` + `calc_bilin_point` | express as 4 link weights in the unified store (§3); one apply path |
+| **Repeated grid→points conversions** | each `map_init` overload re-converts | cache the points view on the grid object |
+
+## Suggested sequencing
+
+1. **KD-tree module + rewire `map_calc_weights`** (§1). Self-contained, immediate
+   win for the methods you use most, no format change. Validate against current
+   output.
+2. **Unified weight store** (§3). Refactor with the search already faster;
+   simplifies the next step.
+3. **Planar analytic conservative clip** (§2, stage 1). Removes `cdo` for
+   projected target grids.
+4. **Spherical conservative clip** (§2, stage 2). Retires the lon-lat gap;
+   full CDO/YAC parity.
+5. **Cleanups** (§4) opportunistically alongside the above.
+
+Throughout, `map_init` and `map_field` remain the only entry points your
+downstream code calls — the speed-up and the removal of the `cdo` dependency are
+entirely under the hood.
+
+::: {.callout-note}
+## Validation strategy
+Each step is gated on reproducing existing results: the KD-tree must return the
+same neighbor sets as the brute-force loop; the analytic conservative weights
+must (a) conserve area to round-off and (b) match `cdo gencon` on the repository
+test grids (`test_ccsm3.f90`, `test_climber.f90`, the MAR/ETOPO tests). Only
+once parity is shown does the `cdo` path get retired.
+:::

@@ -1,0 +1,74 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "coordinates"
+  description: "A Fortran library for grids, point sets, projection and interpolation"
+  site-url: "https://fesmc.github.io/coordinates"
+  repo-url: "https://github.com/fesmc/coordinates"
+  repo-actions: [edit, issue]
+  page-navigation: true
+  navbar:
+    background: primary
+    left:
+      - text: "Overview"
+        file: index.qmd
+      - text: "Concepts"
+        file: concepts.qmd
+      - text: "API"
+        menu:
+          - text: "Coordinates (points & grid)"
+            file: api/coordinates.qmd
+          - text: "Mapping (map_init / map_field)"
+            file: api/mapping.qmd
+          - text: "Conservative remapping"
+            file: api/conservative.qmd
+          - text: "SCRIP / CDO path"
+            file: api/scrip-cdo.qmd
+          - text: "Helper modules"
+            file: api/helpers.qmd
+      - text: "Reference"
+        menu:
+          - text: "Projections & planets"
+            file: reference/projections.qmd
+          - text: "Map file formats"
+            file: reference/map-file-format.qmd
+      - text: "Improvements"
+        file: improvements.qmd
+    right:
+      - icon: github
+        href: https://github.com/fesmc/coordinates
+  sidebar:
+    style: floating
+    collapse-level: 2
+    contents:
+      - index.qmd
+      - concepts.qmd
+      - section: "API"
+        contents:
+          - api/coordinates.qmd
+          - api/mapping.qmd
+          - api/conservative.qmd
+          - api/scrip-cdo.qmd
+          - api/helpers.qmd
+      - section: "Reference"
+        contents:
+          - reference/projections.qmd
+          - reference/map-file-format.qmd
+      - improvements.qmd
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: wrap
+    fig-cap-location: bottom
+    css: styles.css
+
+execute:
+  freeze: auto

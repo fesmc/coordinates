@@ -1,0 +1,157 @@
+---
+title: "Mapping — map_init & map_field"
+---
+
+Module: `coordinates_mapping` (`src/coordinates_mapping.f90`). This is the core
+of the library: build a reusable mapping between two domains, then apply it to
+any number of fields.
+
+## Types
+
+### `map_class`
+
+```fortran
+type map_class
+    character(len=128) :: name1, name2     ! source, target names
+    character(len=128) :: mtype, units
+    type(planet_class) :: planet
+
+    logical :: is_cartesian, is_projection, is_same_map, is_lon180
+    type(projection_class) :: proj
+
+    logical :: is_grid
+    type(grid_axis_class) :: G             ! used when is_grid
+
+    integer :: npts                         ! number of TARGET points
+    real(dp), allocatable :: x(:), y(:), lon(:), lat(:)
+    real(dp) :: xy_conv
+
+    integer :: nmax                         ! max neighbors stored per target point
+    integer, allocatable :: nn(:)
+    type(pt_wts_class), allocatable :: map(:)   ! per-target neighbor structure
+end type
+```
+
+### `pt_wts_class` — the per-target neighbor record
+
+```fortran
+type pt_wts_class
+    integer :: n                                    ! number of neighbors
+    integer,  allocatable :: i(:), quadrant(:), border(:)
+    real(sp), allocatable :: x(:), y(:), dist(:), weight(:), area(:)
+    ! bilinear only:
+    integer,  allocatable :: iquad(:)               ! the 4 quadrant neighbors
+    real(sp), allocatable :: alpha1(:), alpha2(:), alpha3(:)
+end type
+```
+
+- `i` — source-point indices.
+- `dist` — geodesic or Cartesian distance to each neighbor.
+- `weight` — Shepard inverse-distance weight, `1 / dist^p` with `p = 2`.
+- `area` — conservative overlap-area weight (computed but **not** used by the
+  standard `map_field` methods; see [Conservative](conservative.qmd)).
+- `quadrant` — which of the 4 quadrants (I–IV) the neighbor lies in relative to
+  the target, used by the `quadrant` method and bilinear.
+- `alpha1/2/3`, `iquad` — precomputed bilinear coefficients and corner indices.
+
+## `map_init`
+
+Generic interface with four overloads covering every source/target combination:
+
+```fortran
+call map_init(map, grid1, grid2,  max_neighbors [, lat_lim, dist_max, fldr, load, save])
+call map_init(map, grid1, pts2,   max_neighbors [, ...])
+call map_init(map, pts1,  grid2,  max_neighbors [, ...])
+call map_init(map, pts1,  pts2,   max_neighbors [, ...])
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `map` (out) | – | mapping object to fill |
+| source, target | – | any `grid_class` / `points_class` pair |
+| `max_neighbors` | – | max source neighbors stored per target point |
+| `lat_lim` | `5.0°` | latitude pre-filter half-window for the search |
+| `dist_max` | large | hard distance cutoff for accepting a neighbor |
+| `fldr` | `"maps"` | directory for the cached NetCDF map file |
+| `load` | `.TRUE.` | load the cached map if it exists |
+| `save` | `.TRUE.` | write the map to cache after computing |
+
+All four overloads convert their arguments to point sets and delegate to
+`map_init_internal` (`coordinates_mapping.f90:185`), which calls
+`map_calc_weights` to do the search.
+
+### Caching
+
+The map is written to `<fldr>/map_<name1>_<name2>_<nmax>.nc`. On the next run
+with the same names and `max_neighbors`, `map_init` loads it instead of
+recomputing. Because neighbor *distances* are stored, the cached map supports
+any of the `map_field` methods without rebuilding. See
+[Map file formats](../reference/map-file-format.qmd).
+
+::: {.callout-warning}
+## This is the slow step
+`map_calc_weights` (`coordinates_mapping.f90:450`) is a brute-force
+O(n_source × n_target) double loop with a latitude pre-filter and per-insertion
+`cshift` of the neighbor arrays — no spatial index. On large grids the first
+build can take minutes. The cache hides this on subsequent runs, but the
+[improvement proposal](../improvements.qmd) replaces it with a KD-tree.
+:::
+
+## `map_field`
+
+Generic over element type (double / float / integer) and over grid/point
+source & target — 12 overloads, all delegating to
+`map_field_points_points_double` (`coordinates_mapping.f90:1731`):
+
+```fortran
+subroutine map_field(map, name, var1, var2, mask2, method, &
+                     radius, border, missing_value, mask_pack)
+```
+
+| Argument | Meaning |
+|---|---|
+| `map` | the mapping from `map_init` |
+| `name` | field name (for messages) |
+| `var1` | source field (shape matches the source grid/points) |
+| `var2` (inout) | target field (shape matches target) |
+| `mask2` (out, opt) | which target points were successfully filled |
+| `method` | interpolation method (table below) |
+| `radius` (opt) | distance limit applied at apply-time |
+| `border` (opt) | also fill target border points |
+| `missing_value` (opt) | value treated as missing in `var1` / written where unfilled |
+| `mask_pack` (opt) | restrict interpolation to selected target points |
+
+### Methods
+
+| `method` | Behaviour | Neighbors used |
+|---|---|---|
+| `"nn"` / `"nearest"` | nearest-neighbor value | 1 |
+| `"bilinear"` | bilinear from the 4 quadrant neighbors (precomputed α) | 4 |
+| `"quadrant"` | inverse-distance average of the nearest neighbor in *each* quadrant | ≤4 |
+| `"radius"` / `"shepard"` | inverse-distance (Shepard, p=2) average of all neighbors within radius | ≤ `nmax` |
+
+The weighting itself is `var2 = Σ wᵢ·varᵢ / Σ wᵢ` over the (optionally
+quadrant-restricted) neighbor set, skipping missing values
+(`weighted_ave`). Bilinear evaluates
+`p₁ = z₂ + α₁(z₁−z₂)`, `p₀ = z₃ + α₂(z₄−z₃)`, `var = p₀ + α₃(p₁−p₀)`.
+
+### Example
+
+```fortran
+call map_field(map1, "t2m", t2m_src, t2m_dst, mask_map, method="quadrant", &
+               missing_value=-9999.d0)
+```
+
+## Inspecting & comparing maps
+
+```fortran
+call map_print(map)              ! npts, neighbor vector length, memory size
+logical = compare_map(map1, grid2)   ! does an existing map target this grid?
+```
+
+## Dependencies
+
+`coordinates_mapping` builds on `coordinates`, `planet` (distances, quadrants,
+areas, weighted averages), `oblimap_projection_module`, `polygons` (for the
+conservative area weights), `ncio` (cache I/O), `gaussian_filter`, `interp2D`,
+and `index`.

@@ -1,0 +1,181 @@
+---
+title: "Coordinates — points & grids"
+---
+
+Module: `coordinates` (`src/coordinates.f90`). Defines the two geometry types
+and their constructors, conversions, I/O, and cell-area calculation.
+
+## Types
+
+### `points_class`
+
+```fortran
+type points_class
+    character(len=128) :: name        ! dataset name
+    character(len=128) :: mtype       ! latlon | cartesian | stereographic | ...
+    character(len=128) :: units       ! degrees | kilometers | meters | ...
+    type(planet_class) :: planet      ! WGS84 or Spherical Earth
+
+    logical :: is_cartesian, is_projection
+    logical :: is_lon180              ! .TRUE. => lon in [-180,180]; .FALSE. => [0,360]
+    type(projection_class) :: proj
+
+    integer :: npts
+    real(dp), allocatable :: x(:), y(:), lon(:), lat(:), area(:)
+    real(dp), allocatable :: dx(:), dy(:)   ! per-point cell spacing (for conservative)
+    integer,  allocatable :: border(:)
+    real(dp) :: xy_conv               ! axis-units -> meters conversion factor
+end type
+```
+
+### `grid_class`
+
+Same descriptive fields as `points_class`, but the location arrays are 2D and a
+structured-axis descriptor `G` is attached:
+
+```fortran
+type grid_class
+    ! ... same metadata fields as points_class ...
+    integer :: npts
+    real(dp), allocatable :: x(:,:), y(:,:), lon(:,:), lat(:,:), area(:,:)
+    integer,  allocatable :: border(:,:)
+    real(dp) :: xy_conv
+    type(grid_axis_class) :: G
+end type
+
+type grid_axis_class
+    integer  :: nx, ny
+    real(dp) :: x0, dx, y0, dy
+    real(dp), allocatable :: x(:), y(:)
+end type
+```
+
+## Building a grid — `grid_init`
+
+`grid_init` is a generic interface with four constructors. The most common is
+**from options**:
+
+```fortran
+subroutine grid_init_from_opts(grid, name, mtype, units, &
+                               planet, lon180, &
+                               x, y, x0, dx, nx, y0, dy, ny, &
+                               lambda, phi, alpha, x_e, y_n)
+```
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `grid` | ✔ (out) | the grid object to fill |
+| `name` | ✔ | grid name (used in cached map filenames) |
+| `mtype` | ✔ | coordinate/map type string |
+| `units` | ✔ | axis units |
+| `planet` | – | `"WGS84"` (default) or `"Spherical Earth"` |
+| `lon180` | – | longitude convention |
+| `x, y` | – | explicit axis vectors (alternative to `x0/dx/nx`) |
+| `x0, dx, nx` | – | x-axis origin / spacing / count |
+| `y0, dy, ny` | – | y-axis origin / spacing / count |
+| `lambda, phi, alpha` | – | projection centre lon, centre lat, oblique angle |
+| `x_e, y_n` | – | false easting / northing |
+
+Other constructors in the interface:
+
+| Constructor | Builds a grid from… |
+|---|---|
+| `grid_init_from_opts` | explicit options (above) |
+| `grid_init_from_par` | a parameter file (`filename`) |
+| `grid_init_from_grid` | another grid (copy + override axes) |
+| `grid_init_from_points` | an existing `points_class` |
+
+### Examples
+
+```fortran
+! Global 2° lat-lon grid
+call grid_init(g, name="CCSM3-T42", mtype="latlon", units="degrees", &
+               x0=0.d0, dx=2.d0, nx=180, y0=-90.d0, dy=2.d0, ny=90)
+
+! Regional oblique-stereographic grid over Greenland
+call grid_init(g, name="GRL-20KM", mtype="stereographic", units="kilometers", &
+               dx=20.d0, nx=76, dy=20.d0, ny=151, &
+               lambda=-40.d0, phi=72.d0, alpha=7.5d0)
+```
+
+## Building a point set — `points_init`
+
+Generic interface with five constructors. From options:
+
+```fortran
+subroutine points_init_from_opts(pts, name, mtype, units, &
+                                 planet, lon180, &
+                                 x, y, dx, dy, &
+                                 lambda, phi, alpha, x_e, y_n, &
+                                 latlon, verbose)
+```
+
+`x(:)` and `y(:)` are the required location vectors. If `latlon=.TRUE.` the
+supplied `x,y` are interpreted as `lon,lat`. Per-point `dx,dy` may be supplied
+for conservative remapping. The other constructors mirror `grid_init`:
+
+| Constructor | Builds points from… |
+|---|---|
+| `points_init_from_opts` | explicit `x,y` vectors + options |
+| `points_init_from_par` | a parameter file |
+| `points_init_from_file` | a data file (with `skip` header lines) |
+| `points_init_from_points` | another point set |
+| `points_init_from_grid` | a grid |
+
+## Converting between representations
+
+```fortran
+subroutine grid_to_points(grid, pts, mask_pack, define)   ! 2D grid -> 1D points
+subroutine points_to_grid(pts, grid, mask_pack, define)   ! 1D points -> 2D grid
+```
+
+`mask_pack(:,:)` (optional, logical) restricts the conversion to selected cells
+— this is how the library works with sparse subsets of a grid. `define`
+controls whether the target object's metadata is (re)initialised.
+
+## Allocation & comparison helpers
+
+```fortran
+call grid_allocate(grid, var)      ! allocate var to grid shape; generic over
+                                   ! integer / float / double / logical
+call points_allocate(pts, var)     ! same, for a point set
+
+logical = compare_coord(pts1, pts2)   ! do two sets share a coordinate system?
+logical = compare_coord(grid1, grid2)
+```
+
+`grid_allocate` / `points_allocate` are the idiomatic way to size a field
+array to match a grid or point set without restating dimensions.
+
+## Nearest point
+
+```fortran
+idx = pts_which_nearest(pts, x, y, latlon)   ! index of nearest point to (x,y)
+```
+
+## Cell areas
+
+Cell area is computed when a grid is initialised (`grid_area`,
+`coordinates.f90:141`). For each cell the four corner vertices are constructed
+(extending by the cell spacing at boundaries, midpoints in the interior) and
+the area is integrated:
+
+- **Cartesian** grids → shoelace formula in the working units
+  (`cartesian_area`).
+- **Projected** grids → each corner is inverse-projected to lon/lat, then the
+  spherical/ellipsoidal polygon area is integrated (`planet_area`, using
+  GeographicLib).
+- **Lat-lon** grids → `planet_area` directly on the lon/lat corners.
+
+Areas are divided by `xy_conv²` so they end up in the grid's own units. For a
+bare `points_class` (no grid structure) area defaults to `1.0` until set by a
+`grid_to_points` conversion.
+
+## I/O & printing
+
+```fortran
+call grid_write(grid, filename, ...)     ! write grid coordinates to NetCDF
+call points_write(pts, filename, ...)
+call grid_print(grid)                     ! summary to stdout
+call points_print(pts)
+```

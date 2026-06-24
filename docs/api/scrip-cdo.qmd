@@ -1,0 +1,118 @@
+---
+title: "SCRIP / CDO remapping path"
+---
+
+For heavy remapping — especially conservative remapping on large grids — the
+library outsources weight generation to the external
+[`cdo`](https://code.mpimet.mpg.de/projects/cdo) command-line tool, which uses
+[YAC](https://dkrz-sw.gitlab-pages.dkrz.de/yac/) internally to compute
+SCRIP-format weights in seconds. The library writes grid descriptions, invokes
+`cdo`, reads the resulting weight file, and applies it.
+
+Modules:
+
+- `coordinates_mapping_scrip` (`src/coordinates_mapping_scrip.f90`) — SCRIP
+  weight file read/apply, and the `map_scrip_*` user API.
+- `grid_to_cdo` (`src/grid_to_cdo.f90`) — writes CDO grid-description files and
+  runs `cdo`.
+
+## The SCRIP weight format
+
+A SCRIP map is a NetCDF file storing a sparse remapping matrix as parallel
+link arrays. The `map_scrip_class` holds:
+
+- `src_grid_size`, `dst_grid_size`, grid dims, `num_links`, `num_wgts`.
+- Grid geometry: center lon/lat, corner lon/lat, masks, areas, fractions.
+- The sparse matrix as three arrays:
+  - `src_address(num_links)` — source cell index of each link,
+  - `dst_address(num_links)` — destination cell index of each link,
+  - `remap_matrix(num_wgts, num_links)` — the weight(s) of each link
+    (`num_wgts = 1` for first-order conservative / nearest / bilinear).
+
+Applying the map is then: for each destination cell `k`, gather the links with
+`dst_address == k` and form `var2(k) = Σ wⱼ·var1(src_addressⱼ) / Σ wⱼ`.
+
+## User API
+
+### `map_scrip_init`
+
+```fortran
+subroutine map_scrip_init(mps, grid1, grid2, method, fldr, load, clean)
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `mps` (inout) | – | SCRIP map object to fill |
+| `grid1`, `grid2` | – | source and target grids |
+| `method` | `"con"` | `"con"` (conservative), `"bil"` (bilinear), `"bic"` (bicubic) |
+| `fldr` | `"maps"` | directory for grid-desc + map files |
+| `load` | `.TRUE.` | load an existing map file if present |
+| `clean` | – | delete the temporary grid/desc files afterwards |
+
+It writes CDO grid descriptions for both grids, writes the source grid to
+NetCDF, runs `cdo`, then loads the resulting SCRIP file via `map_scrip_load`.
+
+### `map_scrip_field`
+
+```fortran
+subroutine map_scrip_field(map, var_name, var1, var2, mask2, method, reset, &
+                           missing_value, mask_pack, fill_method, &
+                           filt_method, filt_par, verbose)
+```
+
+| Argument | Meaning |
+|---|---|
+| `var1`, `var2` | source / target 2D fields |
+| `method` | `"mean"` (conservative weighted mean), `"count"` (weighted mode), `"stdev"` |
+| `fill_method` | post-fill of unmapped cells: `"weighted"`, `"nn"`, `"none"` |
+| `filt_method` | optional post-smoothing: `"gaussian"`, `"gaussian-fast"`, `"poisson"` |
+| `filt_par` | filter parameters (e.g. σ) |
+| `missing_value`, `mask_pack`, `reset`, `verbose` | as in `map_field` |
+
+The design intentionally mirrors `map_init` / `map_field` so switching a
+workflow between the in-house and CDO paths is a near drop-in change.
+
+### Other entry points
+
+| Routine | Purpose |
+|---|---|
+| `map_scrip_init_from_griddesc(map, src_name, dst_name, fldr, src_nc, method, load)` | the active path that builds the `cdo gen…` command |
+| `map_scrip_load(map, src_name, dst_name, fldr, method)` | read a pre-computed SCRIP NetCDF file |
+
+## The CDO commands
+
+The weight generation (`map_scrip_init_from_griddesc`,
+`coordinates_mapping_scrip.f90:853`) builds and runs:
+
+```sh
+cdo gen<method>,<target_griddesc> -setgrid,<source_griddesc> <source.nc> <map.nc>
+# e.g.
+cdo gencon,grid_GRL.txt -setgrid,grid_CCSM3.txt ccsm3.nc map_CCSM3_GRL.nc
+```
+
+Grid descriptions are produced by `grid_to_cdo`:
+
+- `grid_cdo_write_desc_short(grid, fldr)` — writes a compact CDO grid
+  description (`grid_<name>.txt`): `gridtype` (`lonlat` / `projection` /
+  `cartesian` / `generic`), sizes, axis first/inc, and projection metadata
+  (origin lon/lat, oblique angle, planet axes) as a `grid_mapping`.
+- `grid_cdo_write_desc_explicit_proj(lon2D, lat2D, …)` — explicit curvilinear
+  description with per-cell corner bounds computed from neighbouring centers.
+- `grid_cdo_write_desc_explicit_latlon(lon, lat, …, wraplon)` — 1D lon/lat with
+  optional periodic wrap.
+- `call_system_cdo(cdo_cmd)` — runs the command via `execute_command_line`,
+  checks the exit status, and stops on error.
+
+## Caveats
+
+- Requires `cdo` to be installed and on `PATH` at runtime — an external,
+  out-of-process dependency.
+- The explicit curvilinear path has had trouble with CDO rejecting missing cell
+  corners ("Target grid cell corner coordinates missing!"), so the compact
+  `…_short` descriptions are preferred.
+- `grid_cdo_write_desc_explicit_latlon`'s `wraplon=.TRUE.` is documented as
+  buggy (mis-handles the lon=0 seam).
+
+Removing this external dependency — by computing SCRIP-equivalent conservative
+weights in-house with analytic clipping — is the central goal of the
+[improvement proposal](../improvements.qmd).

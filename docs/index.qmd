@@ -1,0 +1,91 @@
+---
+title: "coordinates"
+subtitle: "Grids, point sets, projection and interpolation in Fortran"
+---
+
+The **coordinates** library manages grids and arbitrary sets of points, and
+maps fields between them. It handles projection between coordinate systems,
+nearest-neighbor and conservative interpolation, and caches the (expensive)
+mapping calculation to disk so it is only ever done once per grid pair.
+
+It is the workhorse behind regional/global climate and ice-sheet model
+pre-processing: taking observations or model output on one grid (a global
+lat-lon grid, an unstructured set of station locations, polygon data) and
+remapping them onto another (e.g. a regional oblique-stereographic grid over
+Greenland or Antarctica).
+
+## The mental model
+
+Everything is built on **points**. A `grid` is just a structured 2D
+arrangement of points, and a `map` records, for each target point, which
+source points feed it and with what weight. Because the design pushes all the
+state into these three objects, mapping a field between two domains takes only
+three steps and no temporary bookkeeping variables.
+
+```{mermaid}
+flowchart LR
+    A["grid_class / points_class<br/>(source)"] -->|map_init| M["map_class<br/>(neighbors + weights,<br/>cached to NetCDF)"]
+    B["grid_class / points_class<br/>(target)"] -->|map_init| M
+    M -->|map_field| F["field on target grid"]
+    V["field on source grid"] --> F
+```
+
+## The three-step example
+
+```fortran
+use coord
+
+type(grid_class) :: gCCSM3, gGRL
+type(map_class)  :: map1
+
+! 1. Define each grid (global lat-lon source, regional stereographic target)
+call grid_init(gCCSM3, name="CCSM3-T42", mtype="latlon", units="degrees", &
+               x0=0.d0,   dx=2.d0, nx=180, y0=-90.d0, dy=2.d0, ny=90)
+
+call grid_init(gGRL, name="GRL-20KM", mtype="stereographic", units="kilometers", &
+               dx=20.d0, nx=76, dy=20.d0, ny=151, &
+               lambda=-40.d0, phi=72.d0, alpha=7.5d0)
+
+! 2. Build (or load from cache) the mapping between them
+call map_init(map1, gCCSM3, gGRL, max_neighbors=10)
+
+! 3. Map a field
+call map_field(map1, "t2m", var_ccsm3, var_grl, mask_map, method="quadrant")
+```
+
+The first `map_init` for a given grid pair computes neighbors and writes a
+NetCDF map file under `maps/`. Every later run loads that file instead of
+recomputing — so the up-front cost (often >1 minute on large grids) is paid
+once.
+
+## What's documented here
+
+- **[Concepts](concepts.qmd)** — the points / grid / map data model and the
+  philosophy of points as the primitive.
+- **API** — the public interface, organised by module:
+  [coordinates](api/coordinates.qmd) (building points & grids),
+  [mapping](api/mapping.qmd) (`map_init` / `map_field`),
+  [conservative](api/conservative.qmd) remapping,
+  the [SCRIP/CDO](api/scrip-cdo.qmd) path, and
+  [helper modules](api/helpers.qmd).
+- **Reference** — [supported projections & planets](reference/projections.qmd)
+  and the [on-disk map file formats](reference/map-file-format.qmd).
+- **[Improvements](improvements.qmd)** — a focused design proposal for replacing
+  the brute-force neighbor search with a KD-tree and the subgrid-sampling
+  conservative weights with analytic spherical-polygon clipping, removing the
+  external CDO dependency while keeping `map_init` / `map_field` unchanged.
+
+## Installation in brief
+
+The library depends only on a Fortran compiler and **NetCDF** (the bundled
+[NCIO](https://github.com/alex-robinson/ncio) wraps it). The optional
+conservative-remapping-via-CDO path additionally calls the `cdo` command-line
+tool at runtime. Build the static library with `make coordinates` and link
+against `libcoordinates/include/libcoordinates.a`, then `use coord` in your
+program.
+
+::: {.callout-note}
+This documentation was reconstructed by reading the source. Line references
+(e.g. `coordinates_mapping.f90:450`) point at the version of the code in this
+repository and are meant as navigation aids.
+:::

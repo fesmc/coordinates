@@ -1,0 +1,80 @@
+---
+title: "Map file formats"
+---
+
+The library persists two kinds of mapping file. Both are NetCDF and both make
+the (expensive) weight computation a one-time cost.
+
+## Native map file (`map_class`)
+
+Written by `map_write` / read by `map_read` (`coordinates_mapping.f90`).
+
+- **Filename:** `<fldr>/map_<name1>_<name2>_<nmax>.nc`
+  (e.g. `maps/map_CCSM3-T42_GRL-20KM_10.nc`).
+- **Keyed by** source name, target name, and `max_neighbors`, so a change in
+  any of them produces a distinct cache file.
+
+### Layout
+
+The per-target neighbor structure (`map(:)%…`) is flattened into packed
+"neighbor vector" arrays so the ragged neighbor counts fit a NetCDF file.
+
+| Dimension | Size | Meaning |
+|---|---|---|
+| `point` | `npts` | target points |
+| `neighbor_vec` | Σ neighbors | packed neighbor links |
+| `point_4` | `npts·4` | bilinear corner indices |
+| `planetpar` | 3 | planet `a, f, R` |
+| `projpar` | 5 | projection `lambda, phi, alpha, x_e, y_n` |
+| `xc/yc` or `lon/lat` | grid axes | present when `is_grid` |
+
+| Variable | Meaning |
+|---|---|
+| `mp_vec_nn(point)` | neighbor count per target point |
+| `mp_vec_i(neighbor_vec)` | source index of each link |
+| `mp_vec_quadrant`, `mp_vec_border` | quadrant / border flag per link |
+| `mp_vec_x`, `mp_vec_y`, `mp_vec_dist` | source coords and distance per link |
+| `mp_vec_weight` | Shepard inverse-distance weight per link |
+| `mp_vec_area` | conservative overlap-area weight per link |
+| `mp_vec_iquad(point_4)` | the 4 bilinear corner indices |
+| `mp_vec_alpha1/2/3(point)` | bilinear coefficients |
+| `x, y, lon, lat` | target coordinates (2D when `is_grid`) |
+| metadata | `mtype, units, is_cartesian, is_projection, is_lon180, is_same_map, is_grid, npts, nmax, xy_conv`, plus `planet_info`, `proj_info` |
+
+On read, `unpack_neighbors` rebuilds the per-point `pt_wts_class` array from the
+packed vectors.
+
+::: {.callout-note}
+Because both the neighbor **distances** and the **areas** are stored, a single
+cached map can drive any `map_field` method (nn / bilinear / quadrant / shepard)
+without recomputation.
+:::
+
+## SCRIP map file (`map_scrip_class`)
+
+Produced by `cdo` and read by `map_scrip_load` (`coordinates_mapping_scrip.f90`).
+This is the standard SCRIP remapping format, a sparse weight matrix as parallel
+link arrays.
+
+| Component | Meaning |
+|---|---|
+| `src_grid_size`, `dst_grid_size` | source / target cell counts |
+| `num_links` | number of source→target links |
+| `num_wgts` | weights per link (1 for first-order conservative / bilinear) |
+| `src_address(num_links)` | source cell index of each link |
+| `dst_address(num_links)` | destination cell index of each link |
+| `remap_matrix(num_wgts, num_links)` | the weight(s) |
+| grid geometry | center & corner lon/lat, masks, `areas`, `fractions` |
+
+Application gathers all links with a given `dst_address` and forms the weighted
+sum `Σ wⱼ var1(src_addressⱼ) / Σ wⱼ`.
+
+## Relationship
+
+The two formats encode the same idea — a sparse source→target weight matrix —
+in different shapes. The native format is neighbor-centric (good for IDW and
+bilinear, where per-link distance/quadrant matter); the SCRIP format is
+link-centric (good for conservative weights). The
+[improvement proposal](../improvements.qmd) suggests converging on a single
+internal sparse-weight representation that both the native and conservative
+paths populate, so `map_field` applies them uniformly.

@@ -1,0 +1,125 @@
+---
+title: "Concepts & data model"
+---
+
+## Points are the primitive
+
+The central design choice of the library is that **all geometry reduces to a set
+of points**. A point carries its location in the working coordinate system
+(`x`, `y`), its geographic location (`lon`, `lat`), and — where meaningful — a
+representative `area` and cell spacing (`dx`, `dy`). Every operation
+(distance, projection, neighbor search, interpolation) is defined on points.
+
+A **grid** is then nothing more than points laid out on a structured 2D mesh,
+plus axis metadata describing that mesh. This is why the library can
+interpolate equally well between two grids, between scattered observations and
+a grid, or between polygons and a grid — they are all just points underneath.
+
+```{mermaid}
+classDiagram
+    class points_class {
+      +npts
+      +x(:) y(:) lon(:) lat(:)
+      +area(:) dx(:) dy(:)
+      +mtype, units, planet, proj
+    }
+    class grid_class {
+      +npts
+      +x(:,:) y(:,:) lon(:,:) lat(:,:)
+      +area(:,:)
+      +G : grid_axis_class
+    }
+    class grid_axis_class {
+      +nx ny
+      +x0 dx y0 dy
+      +x(:) y(:)
+    }
+    class map_class {
+      +npts nmax
+      +map(:) : pt_wts_class
+    }
+    class pt_wts_class {
+      +n
+      +i(:) dist(:) weight(:) area(:)
+      +quadrant(:) border(:)
+    }
+    grid_class --> grid_axis_class
+    grid_class ..> points_class : grid_to_points
+    points_class ..> grid_class : points_to_grid
+    map_class --> pt_wts_class
+```
+
+## The three objects
+
+| Object | Holds | Built by |
+|---|---|---|
+| `points_class` | 1D vectors of locations (+ optional area, dx/dy) | `points_init` |
+| `grid_class` | same, as 2D arrays, plus a `grid_axis_class` | `grid_init` |
+| `map_class` | per-target-point neighbor list + weights | `map_init` |
+
+Convert freely between the first two with `grid_to_points(grid, pts)` and
+`points_to_grid(pts, grid)`.
+
+### Coordinate-system metadata
+
+Both `points_class` and `grid_class` carry the same descriptive fields:
+
+- `mtype` — the coordinate/map type string: `latlon` / `latitude_longitude` /
+  `gaussian`, `cartesian`, or a projection (`stereographic`,
+  `polar_stereographic`, `lambert_azimuthal_equal_area`).
+- `units` — axis units (`degrees`, `kilometers`, `meters`, …). A scalar
+  `xy_conv` factor converts the stored axis units to meters for distance work.
+- `planet` — a `planet_class` (either `"WGS84"` or `"Spherical Earth"`).
+- `proj` — a `projection_class` with parameters `lambda, phi, alpha, x_e, y_n`
+  (only populated when `is_projection`).
+- `is_cartesian`, `is_projection`, `is_lon180` — booleans that drive how
+  distances and neighbors are computed.
+
+See [Projections & planets](reference/projections.qmd) for the full set of
+supported values.
+
+## How a field is mapped
+
+1. **`map_init(map, src, dst, max_neighbors=…)`** finds, for every *target*
+   point, its nearest *source* points (up to `max_neighbors`), records their
+   indices, distances, quadrants, and inverse-distance weights, and (for
+   structured grids) precomputes bilinear coefficients. The whole structure is
+   cached to a NetCDF map file keyed by the two grid names and `max_neighbors`.
+
+2. **`map_field(map, name, var_src, var_dst, …, method=…)`** applies those
+   stored neighbors/weights to an actual field. The method (`nn`, `bilinear`,
+   `quadrant`, `radius`/`shepard`) selects how the per-point neighbor values
+   are combined.
+
+Because the neighbor *distances* are stored, the same cached map supports any
+distance-based weighting scheme without recomputation — you can change
+`method` at `map_field` time for free.
+
+## Distances
+
+Distance is computed two ways, chosen automatically:
+
+- **Cartesian / same projected system** → Euclidean distance in the working
+  units (`cartesian_distance`).
+- **Otherwise (lon-lat or cross-projection)** → geodesic distance on the
+  planet ellipsoid via Karney's
+  [GeographicLib](https://geographiclib.sourceforge.io/) algorithms, bundled
+  as `geodesic.f90` (`planet_distance`).
+
+This is the rule of thumb stated throughout the codebase: *unless both point
+sets live on the same Cartesian/projected system, distances are geodesic
+lon-lat calculations.*
+
+## Where the cost is
+
+Two operations dominate runtime, and both are the focus of the
+[improvement proposal](improvements.qmd):
+
+- **Neighbor search** in `map_init` is brute force — an O(N×M) double loop over
+  source × target points with a latitude pre-filter, no spatial index.
+- **Conservative weights** are approximated by dicing each source cell into
+  subgrid points and counting how many fall inside the target cell, rather than
+  computing the polygon overlap analytically.
+
+Both are correct but slow, which is why heavy conservative remapping is
+currently outsourced to the external `cdo` tool (which uses YAC internally).
